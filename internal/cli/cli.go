@@ -135,32 +135,137 @@ func sourceState(p ocp.Paths) (*ocp.State, error) {
 }
 
 func (r *Runner) setup(p ocp.Paths, args []string) error {
-	wd, e := r.Getwd()
-	if e != nil {
-		return e
-	}
-	source, repo := wd, ""
-	auto, force := true, false
-	if e = parse("setup", args, func(f *flag.FlagSet) {
-		f.StringVar(&source, "source", source, "source directory")
-		f.StringVar(&repo, "repo", "", "repository URL")
-		f.BoolVar(&auto, "no-auto-commit", false, "disable automatic commits")
-		f.BoolVar(&force, "force", false, "overwrite generated drift")
-	}); e != nil {
-		return e
-	}
-	auto = !auto
-	release, e := lock(p)
-	if e != nil {
-		return e
-	}
-	defer release()
 	if s, e := ocp.LoadState(p); e != nil {
 		return e
 	} else if s != nil {
 		return errors.New("OCP is already set up; use apply, sync, or reset first")
 	}
-	if repo != "" {
+	autoFlag := flag.NewFlagSet("setup", flag.ContinueOnError)
+	autoFlag.SetOutput(io.Discard)
+	noAuto := autoFlag.Bool("no-auto-commit", false, "disable automatic commits")
+	force := autoFlag.Bool("force", false, "overwrite generated drift")
+	src := autoFlag.String("source", ".", "source directory")
+	repo := autoFlag.String("repo", "", "repository URL")
+	if err := autoFlag.Parse(args); err != nil {
+		return err
+	}
+	flagArgs := autoFlag.Args()
+	hasFlags := len(flagArgs) > 0 || *repo != "" || !r.tty()
+	if hasFlags {
+		return r.setupNonInteractive(p, *src, *repo, *noAuto, *force)
+	}
+	source, sourceExplicit := "", false
+	repoVar, repoExplicit := "", false
+	autoCommit := true
+	fmt.Fprintln(r.Out)
+	fmt.Fprintln(r.Out, "Welcome to OCP — a declarative configuration manager for OpenCode.")
+	fmt.Fprintln(r.Out)
+	method, e := r.promptMenu(r.Out, "How would you like to begin?", []string{
+		"Create a new local setup",
+		"Import from an existing OpenCode directory",
+		"Use an existing OCP repository",
+	})
+	if e != nil {
+		return e
+	}
+	switch method {
+	case 0:
+		return r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+	case 1:
+		return r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, force)
+	case 2:
+		return r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+	default:
+		return fmt.Errorf("invalid selection")
+	}
+}
+
+func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
+	*source = "."
+	*sourceExplicit = true
+	mode, e := r.promptMenu(r.Out, "Repository type?", []string{
+		"Local only (no Git)",
+		"Back it with a Git repository",
+	})
+	if e != nil {
+		return e
+	}
+	if mode == 1 {
+		rp, e := r.promptText(r.Out, "Git URL or SSH path (leave blank for local init)?")
+		if e != nil {
+			return e
+		}
+		if rp != "" {
+			*repo = rp
+			*repoExplicit = true
+		} else {
+			*autoCommit = true
+		}
+	}
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, *autoCommit, *force)
+}
+
+func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit *bool, autoCommit *bool, force *bool) error {
+	fmt.Fprintln(r.Out)
+	fmt.Fprint(r.Out, "Default OpenCode config directory detected:")
+	def := filepath.Join(os.Getenv("HOME"), ".config", "opencode")
+	fmt.Fprintf(r.Out, "  %s\n\n", def)
+	importPath, e := r.promptTextWithDefault(r.Out, "Input path (blank to skip)", def)
+	if e != nil {
+		return e
+	}
+	if importPath == "" {
+		fmt.Fprintln(r.Out, "Skipping import.")
+		*source = "."
+		*sourceExplicit = true
+		return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force)
+	}
+	*source = "."
+	*sourceExplicit = true
+	if e := importer.Import(importPath, *source, *force); e != nil {
+		return fmt.Errorf("import: %w", e)
+	}
+	fmt.Fprintln(r.Out, "Imported OpenCode configuration.")
+	return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force)
+}
+
+func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
+	cloneDest := filepath.Join(os.Getenv("HOME"), ".config", "opencode-config")
+	url, e := r.promptText(r.Out, "Git repository URL or path:")
+	if e != nil {
+		return e
+	}
+	if url == "" {
+		return errors.New("a repository URL or path is required")
+	}
+	*repo = url
+	*repoExplicit = true
+	dest, e := r.promptTextWithDefault(r.Out, "Clone destination (blank to skip)", cloneDest)
+	if e != nil {
+		return e
+	}
+	if dest != "" {
+		*source = dest
+		*sourceExplicit = true
+	}
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, true, *force)
+}
+
+func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo string, repoExplicit bool, autoCommit bool, force bool) error {
+	if sourceExplicit && !filepath.IsAbs(source) {
+		var err error
+		source, err = canonical(source)
+		if err != nil {
+			return fmt.Errorf("canonical source: %w", err)
+		}
+	} else if !sourceExplicit {
+		wd, err := r.Getwd()
+		if err != nil {
+			return err
+		}
+		source = wd
+	}
+	if repoExplicit && repo != "" {
 		if _, e := os.Stat(source); e == nil {
 			entries, x := os.ReadDir(source)
 			if x != nil {
@@ -175,6 +280,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		if output, cloneErr := clone.CombinedOutput(); cloneErr != nil {
 			return fmt.Errorf("clone repository %q: %w: %s", repo, cloneErr, strings.TrimSpace(string(output)))
 		}
+		fmt.Fprintf(r.Out, "Cloned %q.\n", repo)
 	}
 	if e := os.MkdirAll(source, 0o700); e != nil {
 		return e
@@ -187,29 +293,15 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	} else if e != nil {
 		return e
 	}
-	canonicalSource, e := canonical(source)
-	if e != nil {
-		return fmt.Errorf("canonical source: %w", e)
+	return r.install(p, source, autoCommit, true, force, true)
+}
+
+func (r *Runner) setupNonInteractive(p ocp.Paths, source string, repo string, noAuto bool, force bool) error {
+	auto := !noAuto
+	if !filepath.IsAbs(source) {
+		source = filepath.Clean(source)
 	}
-	gs, e := gitSkills(canonicalSource)
-	if e != nil {
-		return e
-	}
-	_, lockChanged, e := skills.Prepare(canonicalSource, p.Data, gs, true)
-	if e != nil {
-		return e
-	}
-	if auto {
-		repoResult, syncErr := repository.Sync(canonicalSource, true, "ocp: initialize configuration")
-		if syncErr != nil {
-			return fmt.Errorf("initialize repository: %w", syncErr)
-		}
-		r.reportRepository(repoResult)
-	}
-	if lockChanged {
-		fmt.Fprintln(r.Out, "Initialized Git skill lock")
-	}
-	return r.install(p, source, auto, true, force, true)
+	return r.setupRun(p, source, true, repo, repo != "", auto, force)
 }
 
 func gitSkills(source string) ([]config.Skill, error) {
@@ -573,6 +665,51 @@ func (r *Runner) confirm() bool {
 	line = strings.ToLower(strings.TrimSpace(line))
 	return line == "y" || line == "yes"
 }
+
+func (r *Runner) promptMenu(out io.Writer, title string, options []string) (int, error) {
+	fmt.Fprintln(out, "")
+	fmt.Fprint(out, title+"\n")
+	for i, opt := range options {
+		fmt.Fprintf(out, "  %d) %s\n", i+1, opt)
+	}
+	fmt.Fprint(out, "\nSelection: ")
+	line, e := bufio.NewReader(r.In).ReadString('\n')
+	if e != nil {
+		return 0, e
+	}
+	line = strings.TrimSpace(line)
+	n := len(options)
+	for i := 0; i < n; i++ {
+		if fmt.Sprint(i+1) == line {
+			return i, nil
+		}
+	}
+	fmt.Fprintf(r.Err, "Invalid selection: %q\n", line)
+	return r.promptMenu(out, title, options)
+}
+
+func (r *Runner) promptText(out io.Writer, prompt string) (string, error) {
+	fmt.Fprint(out, prompt+" ")
+	line, e := bufio.NewReader(r.In).ReadString('\n')
+	if e != nil {
+		return "", e
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func (r *Runner) promptTextWithDefault(out io.Writer, prompt, def string) (string, error) {
+	fmt.Fprintf(out, "%s [%s] ", prompt, def)
+	line, e := bufio.NewReader(r.In).ReadString('\n')
+	if e != nil {
+		return "", e
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	return line, nil
+}
+
 func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 	wd, e := r.Getwd()
 	if e != nil {
