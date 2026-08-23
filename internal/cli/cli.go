@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/nando/ocp/internal/color"
 	"github.com/nando/ocp/internal/config"
 	"github.com/nando/ocp/internal/importer"
 	"github.com/nando/ocp/internal/ocp"
@@ -33,6 +36,7 @@ type Runner struct {
 	Paths    func() (ocp.Paths, error)
 	Getwd    func() (string, error)
 	Exec     func(string, []string, []string) error
+	c        *color.Writer
 }
 
 func (r *Runner) defaults() {
@@ -44,6 +48,9 @@ func (r *Runner) defaults() {
 	}
 	if r.Err == nil {
 		r.Err = os.Stderr
+	}
+	if r.c == nil {
+		r.c = color.New(r.Out, r.Err)
 	}
 	if r.OpenCode == "" {
 		r.OpenCode = "opencode"
@@ -134,6 +141,39 @@ func sourceState(p ocp.Paths) (*ocp.State, error) {
 	return s, nil
 }
 
+// checkGitAvailable runs git --version with a short timeout and reports the result.
+func (r *Runner) checkGitAvailable() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "--version")
+	out, err := cmd.Output()
+	if err != nil {
+		r.c.CheckErr("git not found or failed to run: " + err.Error())
+		return ""
+	}
+	r.c.Check("git available — " + strings.TrimSpace(string(out)))
+	return strings.TrimSpace(string(out))
+}
+
+// checkRepoAccess runs git ls-remote with a timeout to verify reachability and authentication.
+func (r *Runner) checkRepoAccess(repoURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	err := cmd.Run()
+	if err != nil {
+		if ctx.Err() != nil {
+			r.c.CheckWarn("repository access timed out")
+			return errors.New("repository access timed out")
+		}
+		r.c.CheckErr("cannot reach repository: " + repoURL)
+		return fmt.Errorf("cannot reach repository %q: %w", repoURL, err)
+	}
+	r.c.Check("repository reachable")
+	return nil
+}
+
 func (r *Runner) setup(p ocp.Paths, args []string) error {
 	if s, e := ocp.LoadState(p); e != nil {
 		return e
@@ -150,7 +190,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		return err
 	}
 	flagArgs := autoFlag.Args()
-	hasFlags := len(flagArgs) > 0 || *repo != "" || !r.tty()
+	hasFlags := len(flagArgs) > 0 || *repo != "" || !r.tty() || *src != "."
 	if hasFlags {
 		return r.setupNonInteractive(p, *src, *repo, *noAuto, *force)
 	}
@@ -160,24 +200,45 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	fmt.Fprintln(r.Out)
 	fmt.Fprintln(r.Out, "Welcome to OCP — a declarative configuration manager for OpenCode.")
 	fmt.Fprintln(r.Out)
-	method, e := r.promptMenu(r.Out, "How would you like to begin?", []string{
-		"Create a new local setup",
-		"Import from an existing OpenCode directory",
-		"Use an existing OCP repository",
-	})
+	r.checkGitAvailable()
+	hasOPM := importer.HasOPMProfiles()
+	method, e := r.promptMenuDynamic(r.Out, "How would you like to begin?", hasOPM)
 	if e != nil {
 		return e
 	}
+	activeProfile := ""
 	switch method {
 	case 0:
-		return r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+		e = r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
 	case 1:
-		return r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, force)
+		e = r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, force)
 	case 2:
-		return r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+		if hasOPM {
+			e = r.setupImportOPM(p, &source, &autoCommit, force)
+		} else {
+			e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+		}
+	case 3:
+		if !hasOPM {
+			return fmt.Errorf("invalid selection")
+		}
+		e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
 	default:
 		return fmt.Errorf("invalid selection")
 	}
+	if e != nil {
+		return e
+	}
+	profiles, e := profileNames(source)
+	if e != nil {
+		return e
+	}
+	if selected, selErr := r.selectAllFirstOnly(p, profiles); selErr == nil && selected != "" {
+		activeProfile = selected
+	} else if selErr != nil && !strings.Contains(selErr.Error(), "EOF") {
+		return selErr
+	}
+	return r.setupRun(p, source, sourceExplicit, repoVar, repoExplicit, autoCommit, *force, activeProfile)
 }
 
 func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
@@ -202,7 +263,7 @@ func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, rep
 			*autoCommit = true
 		}
 	}
-	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, *autoCommit, *force)
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, *autoCommit, *force, "")
 }
 
 func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit *bool, autoCommit *bool, force *bool) error {
@@ -218,7 +279,7 @@ func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit
 		fmt.Fprintln(r.Out, "Skipping import.")
 		*source = "."
 		*sourceExplicit = true
-		return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force)
+		return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force, "")
 	}
 	*source = "."
 	*sourceExplicit = true
@@ -226,7 +287,7 @@ func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit
 		return fmt.Errorf("import: %w", e)
 	}
 	fmt.Fprintln(r.Out, "Imported OpenCode configuration.")
-	return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force)
+	return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, *force, "")
 }
 
 func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
@@ -248,10 +309,10 @@ func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *
 		*source = dest
 		*sourceExplicit = true
 	}
-	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, true, *force)
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, true, *force, "")
 }
 
-func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo string, repoExplicit bool, autoCommit bool, force bool) error {
+func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo string, repoExplicit bool, autoCommit bool, force bool, activeProfile string) error {
 	if sourceExplicit && !filepath.IsAbs(source) {
 		var err error
 		source, err = canonical(source)
@@ -280,7 +341,7 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 		if output, cloneErr := clone.CombinedOutput(); cloneErr != nil {
 			return fmt.Errorf("clone repository %q: %w: %s", repo, cloneErr, strings.TrimSpace(string(output)))
 		}
-		fmt.Fprintf(r.Out, "Cloned %q.\n", repo)
+		r.c.Print("Cloned " + repo)
 	}
 	if e := os.MkdirAll(source, 0o700); e != nil {
 		return e
@@ -293,7 +354,15 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 	} else if e != nil {
 		return e
 	}
-	return r.install(p, source, autoCommit, true, force, true)
+	if e := r.install(p, source, autoCommit, true, force, true); e != nil {
+		return e
+	}
+	if activeProfile != "" {
+		if e := ocp.Activate(p, activeProfile); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func (r *Runner) setupNonInteractive(p ocp.Paths, source string, repo string, noAuto bool, force bool) error {
@@ -301,7 +370,7 @@ func (r *Runner) setupNonInteractive(p ocp.Paths, source string, repo string, no
 	if !filepath.IsAbs(source) {
 		source = filepath.Clean(source)
 	}
-	return r.setupRun(p, source, true, repo, repo != "", auto, force)
+	return r.setupRun(p, source, true, repo, repo != "", auto, force, "")
 }
 
 func gitSkills(source string) ([]config.Skill, error) {
@@ -377,17 +446,15 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 		active, _ = ocp.ActiveProfile(p)
 	}
 	fmt.Fprintf(r.Out, "Source: %s\nProfiles: %s\n", source, strings.Join(result.Profiles, ", "))
-	if active != "" {
-		fmt.Fprintf(r.Out, "Active profile: %s\n", active)
-	}
+	r.c.Print("Active profile: " + active)
 	for _, w := range result.Warnings {
-		fmt.Fprintf(r.Out, "Warning: %s\n", w)
+		r.c.Warning(w)
 	}
 	if result.Fallback.FellBack {
-		fmt.Fprintf(r.Out, "Fell back to profile: %s\n", result.Fallback.Active)
+		r.c.Important("Fell back to profile: " + result.Fallback.Active)
 	}
 	if result.Fallback.NoActive && !takeover {
-		fmt.Fprintln(r.Out, "No active profile")
+		r.c.Muted("No active profile")
 	}
 	return nil
 }
@@ -469,42 +536,42 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
-	fmt.Fprintf(r.Out, "Profiles: %s\n", strings.Join(result.Profiles, ", "))
+	r.c.Printf("Profiles: %s", strings.Join(result.Profiles, ", "))
 	for _, w := range result.Warnings {
-		fmt.Fprintf(r.Out, "Warning: %s\n", w)
+		r.c.Warning(w)
 	}
 	if result.Fallback.FellBack {
-		fmt.Fprintf(r.Out, "Fell back to profile: %s\n", result.Fallback.Active)
+		r.c.Important("Fell back to profile: " + result.Fallback.Active)
 	}
 	if result.Fallback.NoActive {
-		fmt.Fprintln(r.Out, "No active profile")
+		r.c.Muted("No active profile")
 	}
 	return nil
 }
 
-func (r *Runner) reportRepository(result repository.Result) {
-	if result.NoGit {
-		fmt.Fprintln(r.Out, "Repository: local-only (not a Git worktree)")
+func (r *Runner) reportRepository(res repository.Result) {
+	if res.NoGit {
+		r.c.Muted("Repository: local-only (not a Git worktree)")
 		return
 	}
 	actions := make([]string, 0, 4)
-	if result.Committed {
+	if res.Committed {
 		actions = append(actions, "committed local changes")
 	}
-	if result.Fetched {
+	if res.Fetched {
 		actions = append(actions, "received remote changes")
 	}
-	if result.Merged {
+	if res.Merged {
 		actions = append(actions, "merged divergent history")
 	}
-	if result.Pushed {
+	if res.Pushed {
 		actions = append(actions, "pushed local changes")
 	}
 	if len(actions) == 0 {
-		fmt.Fprintln(r.Out, "Repository: current")
+		r.c.Muted("Repository: current")
 		return
 	}
-	fmt.Fprintf(r.Out, "Repository: %s\n", strings.Join(actions, ", "))
+	r.c.Printf("Repository: %s", strings.Join(actions, ", "))
 }
 func (r *Runner) use(p ocp.Paths, args []string) error {
 	if len(args) != 1 {
@@ -521,7 +588,7 @@ func (r *Runner) use(p ocp.Paths, args []string) error {
 	if e := ocp.Activate(p, args[0]); e != nil {
 		return e
 	}
-	fmt.Fprintf(r.Out, "Active profile: %s\n", args[0])
+	r.c.Success("Active profile: " + args[0])
 	return nil
 }
 func (r *Runner) run(p ocp.Paths, args []string) error {
@@ -624,7 +691,14 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 	if active == "" {
 		active = "none"
 	}
-	fmt.Fprintf(r.Out, "Source: %s\nAuto-commit: %t\nActive profile: %s\nGenerated profiles: %s\n", source, s.AutoCommit, active, strings.Join(names, ", "))
+	fmt.Fprintf(r.Out, "Source: %s\n", source)
+	r.c.Printf("Auto-commit: %t", s.AutoCommit)
+	if active == "none" {
+		r.c.Muted("Active profile: none")
+	} else {
+		r.c.Print("Active profile: " + active)
+	}
+	r.c.Printf("Generated profiles: %s", strings.Join(names, ", "))
 	return nil
 }
 func (r *Runner) reset(p ocp.Paths, args []string) error {
@@ -649,7 +723,9 @@ func (r *Runner) reset(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
-	fmt.Fprintf(r.Out, "OCP detached. Canonical source remains: %s\nDelete that directory manually to remove it.\n", source)
+	r.c.Success("OCP detached.")
+	r.c.Muted("Canonical source remains: " + source)
+	r.c.Muted("Delete that directory manually to remove it.")
 	return nil
 }
 func (r *Runner) tty() bool {
@@ -710,6 +786,217 @@ func (r *Runner) promptTextWithDefault(out io.Writer, prompt, def string) (strin
 	return line, nil
 }
 
+func (r *Runner) promptMenuDynamic(out io.Writer, title string, hasOPM bool) (int, error) {
+	options := []string{
+		"Create a new local setup",
+		"Import from an existing OpenCode directory",
+	}
+	if hasOPM {
+		options = append(options, "Import from an existing OPM profile")
+	}
+	options = append(options, "Use an existing OCP repository")
+	fmt.Fprintln(out, "")
+	fmt.Fprint(out, title+"\n")
+	for i, opt := range options {
+		fmt.Fprintln(out, r.c.Prompt(i+1, opt))
+	}
+	fmt.Fprint(out, "\nSelection: ")
+	line, e := bufio.NewReader(r.In).ReadString('\n')
+	if e != nil {
+		return 0, e
+	}
+	line = strings.TrimSpace(line)
+	n := len(options)
+	for i := 0; i < n; i++ {
+		if fmt.Sprint(i+1) == line {
+			return i, nil
+		}
+	}
+	fmt.Fprintf(r.Err, "Invalid selection: %q\n", line)
+	return r.promptMenuDynamic(out, title, hasOPM)
+}
+
+func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, force *bool) error {
+	opmDir := importer.DefaultOPMProfileDir()
+	profiles, err := importer.ListOPMProfiles(opmDir)
+	if err != nil {
+		return err
+	}
+	if len(profiles) == 0 {
+		r.c.Muted("No OPM profiles found.")
+		*source = "."
+		return r.setupRun(p, ".", true, "", false, *autoCommit, *force, "")
+	}
+	selected, err := r.selectProfiles(profiles, "Choose profiles to import:")
+	if err != nil {
+		return err
+	}
+	if len(selected) == 0 {
+		r.c.Muted("Skipping OPM import.")
+		*source = "."
+		return r.setupRun(p, ".", true, "", false, *autoCommit, *force, "")
+	}
+	for _, name := range selected {
+		inputPath := filepath.Join(opmDir, name)
+		if e := importer.Import(inputPath, ".", *force); e != nil {
+			return fmt.Errorf("import OPM profile %q: %w", name, e)
+		}
+		r.c.Success("Imported OPM profile: " + name)
+	}
+	*source = "."
+	return r.setupRun(p, ".", true, "", false, *autoCommit, *force, "")
+}
+
+func selectedMarker(idx int, sel map[int]bool) string {
+	if sel[idx] {
+		return applyColor(color.ANSIGreen, "[x]")
+	}
+	return "[ ]"
+}
+
+func (r *Runner) selectProfiles(profiles []string, title string) ([]string, error) {
+	sel := make(map[int]bool)
+	reader := bufio.NewReader(r.In)
+	frameCount := 0
+
+	for {
+		if frameCount > 0 {
+			fmt.Fprint(r.Out, "\033[H\033[2J")
+		}
+		frameCount++
+
+		fmt.Fprintln(r.Out, title)
+		fmt.Fprintln(r.Out)
+		for i, p := range profiles {
+			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, selectedMarker(i, sel))
+		}
+		fmt.Fprintln(r.Out)
+		fmt.Fprint(r.Out, "Toggle: [number] + Enter • Select all: [a] + Enter • Continue: Enter")
+		fmt.Print("> ")
+
+		line, e := reader.ReadString('\n')
+		if e != nil {
+			return nil, e
+		}
+		tokens := strings.Fields(strings.TrimSpace(line))
+
+		if len(tokens) == 0 {
+			result := make([]string, 0, len(sel))
+			for i, p := range profiles {
+				if sel[i] {
+					result = append(result, p)
+				}
+			}
+			return result, nil
+		}
+
+		hasAll := false
+		for _, tok := range tokens {
+			if strings.ToLower(tok) == "a" {
+				hasAll = true
+				continue
+			}
+			var n int
+			if _, err := fmt.Sscanf(tok, "%d", &n); err != nil || n < 1 || n > len(profiles) {
+				fmt.Fprintf(r.Err, "Invalid input: %q\n", strings.TrimSpace(line))
+				continue
+			}
+			if sel[n-1] {
+				delete(sel, n-1)
+			} else {
+				sel[n-1] = true
+			}
+		}
+		if hasAll {
+			allSelected := true
+			for i := range profiles {
+				if !sel[i] {
+					allSelected = false
+					break
+				}
+			}
+			if allSelected {
+				sel = make(map[int]bool)
+			} else {
+				for i := range profiles {
+					sel[i] = true
+				}
+			}
+		}
+	}
+}
+
+// selectAllFirstOnly presents a numbered list and returns the first selected profile.
+func (r *Runner) selectAllFirstOnly(p ocp.Paths, profiles []string) (string, error) {
+	if len(profiles) == 0 {
+		return "", nil
+	}
+	name, err := r.selectSingle(profiles, "Select active profile:")
+	if err != nil {
+		return "", err
+	}
+	if name == "" {
+		return profiles[0], nil
+	}
+	return name, nil
+}
+
+// selectSingle presents a numbered list where pressing a number selects that item.
+// Pressing Enter alone submits the current selection or an empty string if none.
+func (r *Runner) selectSingle(profiles []string, title string) (string, error) {
+	selected := -1
+	reader := bufio.NewReader(r.In)
+	frameCount := 0
+
+	for {
+		if frameCount > 0 {
+			fmt.Fprint(r.Out, "\033[H\033[2J")
+		}
+		frameCount++
+
+		fmt.Fprintln(r.Out, title)
+		fmt.Fprintln(r.Out)
+		for i, p := range profiles {
+			marker := "[ ]"
+			if i == selected {
+				marker = applyColor(color.ANSIGreen, "[x]")
+			}
+			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, marker)
+		}
+		fmt.Fprintln(r.Out)
+		if selected >= 0 {
+			fmt.Fprintln(r.Out, "Press Enter to confirm "+profiles[selected])
+		} else {
+			fmt.Fprint(r.Out, "Enter a number to select, or Enter alone to skip:")
+		}
+
+		line, e := reader.ReadString('\n')
+		if e != nil {
+			return "", e
+		}
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			if selected < 0 {
+				return "", nil
+			}
+			return profiles[selected], nil
+		}
+
+		var n int
+		if _, err := fmt.Sscanf(line, "%d", &n); err != nil || n < 1 || n > len(profiles) {
+			fmt.Fprintf(r.Err, "Invalid selection: %q\n", line)
+			continue
+		}
+		selected = n - 1
+	}
+}
+
+// applyColor wraps text with ANSI escape codes when colors are enabled.
+func applyColor(code, text string) string {
+	return color.ApplyColor(code, text)
+}
+
 func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 	wd, e := r.Getwd()
 	if e != nil {
@@ -741,7 +1028,7 @@ func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 			fmt.Fprint(r.Out, "Existing source files will be overwritten. Continue? [y/N] ")
 			if r.confirm() {
 				if retry := importer.Import(input, source, true); retry == nil {
-					fmt.Fprintf(r.Out, "Imported OpenCode configuration into %s\n", source)
+					r.c.Success("Imported OpenCode configuration into " + source)
 					return nil
 				} else {
 					return retry
@@ -751,6 +1038,6 @@ func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 		}
 		return e
 	}
-	fmt.Fprintf(r.Out, "Imported OpenCode configuration into %s\n", source)
+	r.c.Success("Imported OpenCode configuration into " + source)
 	return nil
 }

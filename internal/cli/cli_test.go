@@ -141,3 +141,159 @@ func TestImportBasic(t *testing.T) {
 		t.Fatalf("import did not preserve config: %s", b)
 	}
 }
+
+func TestSelectProfiles(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "single number toggles",
+			input: "1\n2\n\n",
+			want:  []string{"alpha", "beta"},
+		},
+		{
+			name:  "multiple numbers in one line",
+			input: "1 3\n\n",
+			want:  []string{"alpha", "gamma"},
+		},
+		{
+			name:  "select all via a then submit",
+			input: "a\n\n",
+			want:  []string{"alpha", "beta", "gamma"},
+		},
+		{
+			name:  "deselect all via a, then submit empty",
+			input: "a\na\n\n",
+			want:  []string{},
+		},
+		{
+			name:  "toggle one then select all",
+			input: "1\na\n\n",
+			want:  []string{"alpha", "beta", "gamma"},
+		},
+		{
+			name:  "skip with blank line",
+			input: "\n",
+			want:  []string{},
+		},
+		{
+			name:  "invalid then valid",
+			input: "5\n1\n\n",
+			want:  []string{"alpha"},
+		},
+		{
+			name:  "mixed valid and invalid",
+			input: "0 1 99 2\n\n",
+			want:  []string{"alpha", "beta"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profiles := []string{"alpha", "beta", "gamma"}
+			in := strings.NewReader(tt.input)
+			var out, err bytes.Buffer
+			r := &Runner{In: in, Out: &out, Err: &err}
+			result, e := r.selectProfiles(profiles, "Choose profiles to import:")
+			if e != nil {
+				t.Fatalf("unexpected error: %v", e)
+			}
+			if len(result) != len(tt.want) {
+				t.Fatalf("got %d profiles: %v, want %d: %v", len(result), result, len(tt.want), tt.want)
+			}
+			for i, w := range tt.want {
+				if result[i] != w {
+					t.Fatalf("result[%d] = %q, want %q", i, result[i], w)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectSingle(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "select by number",
+			input: "1\n\n",
+			want:  "alpha",
+		},
+		{
+			name:  "select second profile",
+			input: "2\n\n",
+			want:  "beta",
+		},
+		{
+			name:  "skip with blank line",
+			input: "\n",
+			want:  "",
+		},
+		{
+			name:  "invalid then valid",
+			input: "5\n1\n\n",
+			want:  "alpha",
+		},
+		{
+			name:  "toggle selection before confirming",
+			input: "2\n1\n\n",
+			want:  "alpha",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profiles := []string{"alpha", "beta", "gamma"}
+			in := strings.NewReader(tt.input)
+			var out, err bytes.Buffer
+			r := &Runner{In: in, Out: &out, Err: &err}
+			result, e := r.selectSingle(profiles, "Test menu:")
+			if e != nil {
+				t.Fatalf("unexpected error: %v", e)
+			}
+			if result != tt.want {
+				t.Fatalf("got %q, want %q", result, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectAllFirstOnly(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "pick a profile",
+			input: "2\n\n",
+			want:  "beta",
+		},
+		{
+			name:  "skip picks first",
+			input: "\n",
+			want:  "alpha",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profiles := []string{"alpha", "beta", "gamma"}
+			in := strings.NewReader(tt.input)
+			p := testPaths(t)
+			var out, err bytes.Buffer
+			r := &Runner{In: in, Out: &out, Err: &err, Paths: func() (ocp.Paths, error) { return p, nil }}
+			first, e := r.selectAllFirstOnly(p, profiles)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if first != tt.want {
+				t.Fatalf("first = %q, want %q", first, tt.want)
+			}
+		})
+	}
+}
