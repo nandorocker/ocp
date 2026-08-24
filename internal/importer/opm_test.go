@@ -87,3 +87,95 @@ func TestImportOPMSkipsNonOpenCodeProfiles(t *testing.T) {
 		t.Fatalf("expected 0 OpenCode profiles, got %d", len(profiles))
 	}
 }
+
+func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
+	src := t.TempDir()
+
+	writeFile := func(name, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	profile1 := filepath.Join(src, "profile1")
+	writeFile(filepath.Join(profile1, "opencode.json"), `{"agent":{"build":{"model":"test"}}}`)
+	writeFile(filepath.Join(profile1, "AGENTS.md"), "guide\n")
+	writeFile(filepath.Join(profile1, "agent", "deep-explore.md"), "explore agent\n")
+	writeFile(filepath.Join(profile1, "agent", "chore.md"), "chore agent\n")
+
+	profile2 := filepath.Join(src, "profile2")
+	writeFile(filepath.Join(profile2, "opencode.json"), `{"config":{"custom":"val"}}`)
+	writeFile(filepath.Join(profile2, "agent", "deep-explore.md"), "explore agent v2\n") // dup name
+	writeFile(filepath.Join(profile2, "agent", "research.md"), "research agent\n")    // unique name
+
+	source := t.TempDir()
+	data1, err := ReadProfileData(profile1)
+	if err != nil {
+		t.Fatalf("read profile1: %v", err)
+	}
+	data2, err := ReadProfileData(profile2)
+	if err != nil {
+		t.Fatalf("read profile2: %v", err)
+	}
+
+	if err := MergeProfiles([]*ImportProfileData{data1, data2}, source, true); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(source, "ocp.yaml")); err != nil {
+		t.Fatal("ocp.yaml not created")
+	}
+
+	agentsDir := filepath.Join(source, "agents")
+	for _, f := range []string{"deep-explore.md", "chore.md", "research.md"} {
+		path := filepath.Join(agentsDir, f)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected agent file %s but got: %v", path, err)
+		}
+	}
+
+	content, err := os.ReadFile(filepath.Join(agentsDir, "deep-explore.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "explore agent v2\n" {
+		t.Fatalf("deep-explore.md content = %q, want %q", string(content), "explore agent v2\n")
+	}
+
+	if _, err := os.Stat(filepath.Join(source, "AGENTS.md")); err != nil {
+		t.Error("AGENTS.md not copied")
+	}
+
+	// Verify profile files are written instead of inline profiles
+	profilesDir := filepath.Join(source, "profiles")
+	for _, name := range []string{"profile1", "profile2"} {
+		profPath := filepath.Join(profilesDir, name+".yaml")
+		if _, err := os.Stat(profPath); err != nil {
+			t.Errorf("expected profile file %s", profPath)
+		} else {
+			content, err := os.ReadFile(profPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(content), "extends:") && name == "profile2" {
+				if !strings.Contains(string(content), "extends: profile1") {
+					t.Errorf("profile2 should extend profile1, got:\n%s", content)
+				}
+			}
+		}
+	}
+
+	// Ensure ocp.yaml does NOT contain inline profiles
+	yamlContent, err := os.ReadFile(filepath.Join(source, "ocp.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(yamlContent)
+	if strings.Contains(text, "profiles:") {
+		t.Error("ocp.yaml should not contain inline profiles key")
+	}
+}

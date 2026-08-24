@@ -72,21 +72,24 @@ func Import(input, source string, force bool) error {
 		}
 		doc.Instructions = []string{"./AGENTS.md"}
 	}
-	if entries, err := os.ReadDir(filepath.Join(root, "agents")); err == nil {
-		doc.Agents = map[string]agent{}
-		for _, e := range entries {
-			if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
-				continue
+	agentDirName := agentDir(root)
+	if agentDirName != "" {
+		if entries, err := os.ReadDir(filepath.Join(root, agentDirName)); err == nil {
+			doc.Agents = map[string]agent{}
+			for _, e := range entries {
+				if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+					continue
+				}
+				name := e.Name()[:len(e.Name())-3]
+				dst := filepath.Join(source, "agents", e.Name())
+				if err := copyFile(dst, filepath.Join(root, agentDirName, e.Name()), force); err != nil {
+					return err
+				}
+				doc.Agents[name] = agent{File: "./agents/" + e.Name()}
 			}
-			name := e.Name()[:len(e.Name())-3]
-			dst := filepath.Join(source, "agents", e.Name())
-			if err := copyFile(dst, filepath.Join(root, "agents", e.Name()), force); err != nil {
-				return err
-			}
-			doc.Agents[name] = agent{File: "./agents/" + e.Name()}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	if entries, err := os.ReadDir(filepath.Join(root, "skills")); err == nil {
 		for _, e := range entries {

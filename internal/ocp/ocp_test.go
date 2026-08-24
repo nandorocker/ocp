@@ -293,3 +293,25 @@ func TestSSHSkillIsGitBacked(t *testing.T) {
 		t.Fatal("ssh Git skill was treated as a local path")
 	}
 }
+
+func TestDefaultPathsSetsOCPSrcToConfigHomeOcp(t *testing.T) {
+	home := t.TempDir()
+	configHome := filepath.Join(home, "config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	p, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(configHome, "ocp")
+	if p.OCPSrc != want {
+		t.Fatalf("OCPSrc = %q, want %q", p.OCPSrc, want)
+	}
+}
+
+func TestDefaultOCPSrcConstantMatchesExpectedValue(t *testing.T) {
+	want := "~/.config/ocp"
+	if DefaultOCPSrc != want {
+		t.Fatalf("DefaultOCPSrc = %q, want %q", DefaultOCPSrc, want)
+	}
+}

@@ -38,7 +38,7 @@ func TestSetupApplyUseListStatusAndReset(t *testing.T) {
 	if err := r.Run([]string{"setup", "--source", source}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Active profile: default") {
+	if !strings.Contains(out.String(), "Setup complete") {
 		t.Fatalf("setup output: %s", out.String())
 	}
 	if err := r.Run([]string{"use", "deep"}); err != nil {
@@ -220,12 +220,12 @@ func TestSelectSingle(t *testing.T) {
 	}{
 		{
 			name:  "select by number",
-			input: "1\n\n",
+			input: "1\n",
 			want:  "alpha",
 		},
 		{
 			name:  "select second profile",
-			input: "2\n\n",
+			input: "2\n",
 			want:  "beta",
 		},
 		{
@@ -235,12 +235,7 @@ func TestSelectSingle(t *testing.T) {
 		},
 		{
 			name:  "invalid then valid",
-			input: "5\n1\n\n",
-			want:  "alpha",
-		},
-		{
-			name:  "toggle selection before confirming",
-			input: "2\n1\n\n",
+			input: "5\n1\n",
 			want:  "alpha",
 		},
 	}

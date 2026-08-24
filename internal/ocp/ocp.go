@@ -20,12 +20,16 @@ import (
 
 const manifestName = ".ocp-manifest.json"
 
+// DefaultOCPSrc is the canonical user-owned OCP configuration directory.
+const DefaultOCPSrc = "~/.config/ocp"
+
 // Paths contains all machine-local locations used by OCP.
 type Paths struct {
 	Home, ConfigHome, DataHome, StateHome string
 	OpenCode, Data, Releases, Current     string
 	RunConfigHome                         string
 	StateFile, LockFile                   string
+	OCPSrc                                string
 }
 
 // DefaultPaths derives locations from HOME and the XDG environment variables.
@@ -43,6 +47,7 @@ func DefaultPaths() (Paths, error) {
 	p.Releases, p.Current = filepath.Join(p.Data, "releases"), filepath.Join(p.Data, "current")
 	p.RunConfigHome = filepath.Join(p.Data, "run-config")
 	p.StateFile, p.LockFile = filepath.Join(stateHome, "ocp", "state.json"), filepath.Join(configHome, ".opencode.ocp.lock")
+	p.OCPSrc = filepath.Join(configHome, "ocp")
 	return p, nil
 }
 func envOr(name, fallback string) string {
@@ -159,7 +164,7 @@ func Render(o RenderOptions) (RenderResult, error) {
 	if err != nil {
 		return RenderResult{}, err
 	}
-	profiles, err := config.Resolve(doc)
+	profiles, err := doc.ResolveFromDir(source)
 	if err != nil {
 		return RenderResult{}, err
 	}

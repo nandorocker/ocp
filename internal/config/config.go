@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -14,24 +15,25 @@ const FileName = "ocp.yaml"
 
 // Document is the parsed OCP configuration.
 type Document struct {
-	Version          int
-	Config           map[string]any
-	Instructions     []string
-	Skills           []Skill
-	Plugins          []string
-	Agents           map[string]Agent
-	Profiles         map[string]ProfileSpec
+	Version          int                    `yaml:"version"`
+	Config           map[string]any         `yaml:"config,omitempty"`
+	Instructions     []string               `yaml:"instructions,omitempty"`
+	Skills           []Skill                `yaml:"skills,omitempty"`
+	Plugins          []string               `yaml:"plugins,omitempty"`
+	Agents           map[string]Agent       `yaml:"agents,omitempty"`
+	Profiles         map[string]ProfileSpec `yaml:"profiles,omitempty"`
 	profilesDeclared bool
+	SourceDir        string `yaml:"-"` // runtime only, never serialized
 }
 
 // ProfileSpec is an unresolved profile declaration.
 type ProfileSpec struct {
-	Extends      string
-	Config       map[string]any
-	Instructions []string
-	Skills       []Skill
-	Plugins      []string
-	Agents       map[string]Agent
+	Extends      string         `yaml:",omitempty"`
+	Config       map[string]any `yaml:"config,omitempty"`
+	Instructions []string       `yaml:"instructions,omitempty"`
+	Skills       []Skill        `yaml:"skills,omitempty"`
+	Plugins      []string       `yaml:"plugins,omitempty"`
+	Agents       map[string]Agent `yaml:"agents,omitempty"`
 }
 
 // Skill identifies a local or Git-backed skill source. Ref is optional.
@@ -244,6 +246,9 @@ func (s Skill) declaration() string { return s.Source + "\x00" + s.Ref }
 
 func mergeAgents(base, child map[string]Agent) map[string]Agent {
 	out := cloneAgents(base)
+	if out == nil {
+		out = make(map[string]Agent, len(child))
+	}
 	for name, agent := range child {
 		if inherited, ok := out[name]; ok {
 			if agent.File != "" {
@@ -394,6 +399,210 @@ func profiles(node *yaml.Node) (map[string]ProfileSpec, error) {
 		out[name] = p
 	}
 	return out, nil
+}
+
+// ResolveFromDir resolves profiles using file-based profile discovery when
+// doc.SourceDir is set and the profiles directory exists.  Otherwise it falls
+// back to inline profiles already parsed from ocp.yaml.
+func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
+	doc.SourceDir = sourceDir
+
+	profilesDir := filepath.Join(sourceDir, "profiles")
+	entries, err := os.ReadDir(profilesDir)
+	if err == nil {
+		var hasFileProfiles bool
+		for _, e := range entries {
+			if !e.IsDir() && (strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml")) {
+				hasFileProfiles = true
+				break
+			}
+		}
+		if hasFileProfiles {
+			fileProfiles, err := loadFileProfiles(sourceDir, profilesDir, doc.Profiles)
+			if err != nil {
+				return nil, err
+			}
+			resolved, err := resolveProfiles(doc, fileProfiles)
+			if err != nil {
+				return nil, err
+			}
+			return resolved, nil
+		}
+	}
+
+	if !doc.profilesDeclared {
+		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
+	}
+
+	names := make([]string, 0, len(doc.Profiles))
+	for name := range doc.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	profiles := make([]Profile, 0, len(names))
+	for _, name := range names {
+		p, ok := doc.Profiles[name]
+		if !ok {
+			continue
+		}
+		spec := cloneProfileSpec(p)
+		composition := mergeComposition(
+			compositionFromDocument(doc),
+			compositionFromProfile(spec),
+		)
+		profiles = append(profiles, resolved(name, composition))
+	}
+	return profiles, nil
+}
+
+func loadFileProfiles(sourceDir, profilesDir string, inlineProfiles map[string]ProfileSpec) (map[string]ProfileSpec, error) {
+	entries, err := os.ReadDir(profilesDir)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]ProfileSpec)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		base := name[:len(name)-5]
+		if strings.HasSuffix(base, ".yaml") {
+			base = base[:len(base)-5]
+		} else if strings.HasSuffix(base, ".yml") {
+			base = base[:len(base)-4]
+		}
+		if err := validName("profile file", base); err != nil {
+			continue
+		}
+
+		filePath := filepath.Join(profilesDir, name)
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("read profile file %q: %w", name, err)
+		}
+
+		var node yaml.Node
+		if err := yaml.Unmarshal(data, &node); err != nil {
+			return nil, fmt.Errorf("parse profile file %q: %w", name, err)
+		}
+		if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("profile file %q must be a YAML mapping", name)
+		}
+
+		values, err := mapping(node.Content[0], "profile file "+base, "extends", "config", "instructions", "skills", "plugins", "agents")
+		if err != nil {
+			return nil, err
+		}
+
+		var spec ProfileSpec
+		if v := values["extends"]; v != nil {
+			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" {
+				return nil, fmt.Errorf("profile %q extends must be a string", base)
+			}
+			if err := v.Decode(&spec.Extends); err != nil {
+				return nil, fmt.Errorf("profile %q extends must be a string", base)
+			}
+			if spec.Extends == "" {
+				return nil, fmt.Errorf("profile %q extends must not be empty", base)
+			}
+		}
+		if spec.Config, err = nativeMap(values["config"], "profile "+base+" config"); err != nil {
+			return nil, err
+		}
+		if spec.Instructions, err = stringsList(values["instructions"], "profile "+base+" instructions"); err != nil {
+			return nil, err
+		}
+		if spec.Skills, err = skills(values["skills"]); err != nil {
+			return nil, err
+		}
+		if spec.Plugins, err = stringsList(values["plugins"], "profile "+base+" plugins"); err != nil {
+			return nil, err
+		}
+		if spec.Agents, err = agents(values["agents"]); err != nil {
+			return nil, err
+		}
+		result[base] = spec
+	}
+	return result, nil
+}
+
+func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec) ([]Profile, error) {
+	states := make(map[string]uint8, len(fileProfiles))
+	resolvedProfiles := make(map[string]Profile, len(fileProfiles))
+	var visit func(string) (Profile, error)
+
+	visit = func(name string) (Profile, error) {
+		switch states[name] {
+		case 1:
+			return Profile{}, fmt.Errorf("profile inheritance cycle at %q", name)
+		case 2:
+			return resolvedProfiles[name], nil
+		}
+		spec, fileExists := fileProfiles[name]
+		_, inlineExists := rootDoc.Profiles[name]
+		if !fileExists && !inlineExists {
+			return Profile{}, fmt.Errorf("unknown profile %q", name)
+		}
+		states[name] = 1
+
+		base := compositionFromDocument(rootDoc)
+		var profileSpec ProfileSpec
+		if fileExists {
+			profileSpec = cloneProfileSpec(spec)
+		} else {
+			profileSpec = rootDoc.Profiles[name]
+		}
+
+		ext := profileSpec.Extends
+		if ext != "" {
+			_, parentInFiles := fileProfiles[ext]
+			_, parentInInline := rootDoc.Profiles[ext]
+			if !parentInFiles && !parentInInline {
+				return Profile{}, fmt.Errorf("profile %q extends unknown profile %q", name, ext)
+			}
+			parent, err := visit(ext)
+			if err != nil {
+				return Profile{}, err
+			}
+			base = compositionFromResolved(parent)
+		}
+
+		profile := resolved(name, mergeComposition(base, compositionFromProfile(profileSpec)))
+		states[name] = 2
+		resolvedProfiles[name] = profile
+		return profile, nil
+	}
+
+	names := make([]string, 0, len(fileProfiles))
+	for name := range fileProfiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	profiles := make([]Profile, 0, len(names))
+	for _, name := range names {
+		profile, err := visit(name)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
+}
+
+func cloneProfileSpec(ps ProfileSpec) ProfileSpec {
+	return ProfileSpec{
+		Extends:      ps.Extends,
+		Config:       cloneMap(ps.Config),
+		Instructions: append([]string(nil), ps.Instructions...),
+		Skills:       append([]Skill(nil), ps.Skills...),
+		Plugins:      append([]string(nil), ps.Plugins...),
+		Agents:       cloneAgents(ps.Agents),
+	}
 }
 
 func agents(node *yaml.Node) (map[string]Agent, error) {
