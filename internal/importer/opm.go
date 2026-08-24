@@ -166,6 +166,7 @@ func MergeProfiles(data []*ImportProfileData, source string, force bool) error {
 	globalSkills := make(map[string]bool)
 	globalPlugins := make(map[string]bool)
 	var globalInstructions []string
+	seenInstructions := map[string]bool{}
 	guideSource := ""
 
 	orderedNames := make([]string, 0, len(data))
@@ -184,6 +185,10 @@ func MergeProfiles(data []*ImportProfileData, source string, force bool) error {
 			if instList, ok := instRaw.([]any); ok {
 				for _, inst := range instList {
 					if s, ok := inst.(string); ok {
+						if seenInstructions[s] {
+							continue
+						}
+						seenInstructions[s] = true
 						globalInstructions = append(globalInstructions, s)
 					}
 				}
