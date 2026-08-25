@@ -74,6 +74,34 @@ func TestSetupApplyUseListStatusAndReset(t *testing.T) {
 	}
 }
 
+func TestSetupMigrateProfilesForConfiguredSource(t *testing.T) {
+	p := testPaths(t)
+	source := filepath.Join(t.TempDir(), "source")
+	write(t, filepath.Join(source, "ocp.yaml"), "version: 1\nprofiles:\n  default: {}\n  deep:\n    extends: default\n    config:\n      model: deep/model\n")
+	var out bytes.Buffer
+	r := runner(p, &out)
+	if err := r.Run([]string{"setup", "--source", source}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := r.Run([]string{"setup", "--migrate-profiles"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Migrated inline profiles") {
+		t.Fatalf("output = %q", out.String())
+	}
+	root, err := os.ReadFile(filepath.Join(source, "ocp.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(root), "profiles:") {
+		t.Fatalf("root still contains profiles: %s", root)
+	}
+	if _, err := os.Stat(filepath.Join(source, "profiles", "deep.yaml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyRefusesDriftWithoutForce(t *testing.T) {
 	p := testPaths(t)
 	source := filepath.Join(t.TempDir(), "source")

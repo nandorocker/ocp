@@ -110,7 +110,7 @@ func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
 	profile2 := filepath.Join(src, "profile2")
 	writeFile(filepath.Join(profile2, "opencode.json"), `{"config":{"custom":"val"}}`)
 	writeFile(filepath.Join(profile2, "agent", "deep-explore.md"), "explore agent v2\n") // dup name
-	writeFile(filepath.Join(profile2, "agent", "research.md"), "research agent\n")    // unique name
+	writeFile(filepath.Join(profile2, "agent", "research.md"), "research agent\n")       // unique name
 
 	source := t.TempDir()
 	data1, err := ReadProfileData(profile1)
@@ -131,7 +131,7 @@ func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
 	}
 
 	agentsDir := filepath.Join(source, "agents")
-	for _, f := range []string{"deep-explore.md", "chore.md", "research.md"} {
+	for _, f := range []string{"deep-explore.md", "deep-explore--profile2.md", "chore.md", "research.md"} {
 		path := filepath.Join(agentsDir, f)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected agent file %s but got: %v", path, err)
@@ -142,12 +142,12 @@ func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != "explore agent v2\n" {
-		t.Fatalf("deep-explore.md content = %q, want %q", string(content), "explore agent v2\n")
+	if string(content) != "explore agent\n" {
+		t.Fatalf("deep-explore.md content = %q, want %q", string(content), "explore agent\n")
 	}
 
-	if _, err := os.Stat(filepath.Join(source, "AGENTS.md")); err != nil {
-		t.Error("AGENTS.md not copied")
+	if _, err := os.Stat(filepath.Join(source, "instructions", "profile1.md")); err != nil {
+		t.Error("profile instructions not copied")
 	}
 
 	// Verify profile files are written instead of inline profiles
@@ -161,10 +161,11 @@ func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(content), "extends:") && name == "profile2" {
-				if !strings.Contains(string(content), "extends: profile1") {
-					t.Errorf("profile2 should extend profile1, got:\n%s", content)
-				}
+			if strings.Contains(string(content), "extends:") {
+				t.Errorf("imported profile should remain independent, got:\n%s", content)
+			}
+			if name == "profile2" && !strings.Contains(string(content), "file: ./agents/deep-explore--profile2.md") {
+				t.Errorf("profile2 should reference its distinct agent source, got:\n%s", content)
 			}
 		}
 	}
@@ -177,5 +178,50 @@ func TestMergeProfilesCopiesAgentFiles(t *testing.T) {
 	text := string(yamlContent)
 	if strings.Contains(text, "profiles:") {
 		t.Error("ocp.yaml should not contain inline profiles key")
+	}
+}
+
+func TestMergeProfilesPreflightsAndReplacesProfileDirectory(t *testing.T) {
+	root := t.TempDir()
+	profile1 := filepath.Join(root, "profile1")
+	profile2 := filepath.Join(root, "profile2")
+	for _, profile := range []string{profile1, profile2} {
+		if err := os.MkdirAll(profile, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profile, "opencode.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data1, err := ReadProfileData(profile1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data2, err := ReadProfileData(profile2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "ocp.yaml"), []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeProfiles([]*ImportProfileData{data1, data2}, source, false); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("MergeProfiles error = %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(source, "ocp.yaml")); err != nil || string(content) != "keep\n" {
+		t.Fatalf("ocp.yaml = %q, %v", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "profiles")); !os.IsNotExist(err) {
+		t.Fatalf("profiles written before preflight completed: %v", err)
+	}
+
+	if err := MergeProfiles([]*ImportProfileData{data1, data2}, source, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeProfiles([]*ImportProfileData{data1}, source, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "profiles", "profile2.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("stale profile remains after forced import: %v", err)
 	}
 }

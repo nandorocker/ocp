@@ -35,20 +35,33 @@ ocp sync
 
 ## Quick Start
 
-Create `ocp.yaml` in a directory you want to use as the canonical source:
+Create `ocp.yaml` for shared configuration:
 
 ```yaml
 version: 1
 
 config:
   model: openrouter/example-model
-
-profiles:
-  default: {}
-  deep:
-    config:
-      model: openrouter/example-reasoning-model
 ```
+
+For multiple profiles, add one `.yaml` or `.yml` file per profile. The filename is the profile name:
+
+```yaml
+# profiles/default.yaml
+{}
+```
+
+```yaml
+# profiles/deep.yaml
+extends: default
+config:
+  model: openrouter/example-reasoning-model
+agents:
+  implementer:
+    model: openai/example-coding-model
+```
+
+`agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in the referenced agent Markdown frontmatter remains authoritative.
 
 Then initialize and switch profiles:
 
@@ -59,6 +72,14 @@ opencode
 ```
 
 OCP preserves an existing global OpenCode configuration during setup. `ocp reset` restores it and leaves the canonical OCP source untouched.
+
+Legacy inline profiles remain readable. Migrate them explicitly after setup with:
+
+```bash
+ocp setup --migrate-profiles
+```
+
+Before initial setup, pass the legacy source explicitly: `ocp setup --migrate-profiles --source /path/to/source`.
 
 For a Git-backed canonical source on another machine:
 

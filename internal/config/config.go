@@ -2,9 +2,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -28,11 +30,11 @@ type Document struct {
 
 // ProfileSpec is an unresolved profile declaration.
 type ProfileSpec struct {
-	Extends      string         `yaml:",omitempty"`
-	Config       map[string]any `yaml:"config,omitempty"`
-	Instructions []string       `yaml:"instructions,omitempty"`
-	Skills       []Skill        `yaml:"skills,omitempty"`
-	Plugins      []string       `yaml:"plugins,omitempty"`
+	Extends      string           `yaml:",omitempty"`
+	Config       map[string]any   `yaml:"config,omitempty"`
+	Instructions []string         `yaml:"instructions,omitempty"`
+	Skills       []Skill          `yaml:"skills,omitempty"`
+	Plugins      []string         `yaml:"plugins,omitempty"`
 	Agents       map[string]Agent `yaml:"agents,omitempty"`
 }
 
@@ -40,6 +42,16 @@ type ProfileSpec struct {
 type Skill struct {
 	Source string
 	Ref    string
+}
+
+func (s Skill) MarshalYAML() (any, error) {
+	if s.Ref == "" {
+		return s.Source, nil
+	}
+	return struct {
+		Git string `yaml:"git"`
+		Ref string `yaml:"ref"`
+	}{Git: s.Source, Ref: s.Ref}, nil
 }
 
 // Agent is an agent source file and its native OpenCode configuration.
@@ -89,55 +101,7 @@ func Resolve(doc *Document) ([]Profile, error) {
 	if !doc.profilesDeclared {
 		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
 	}
-
-	states := make(map[string]uint8, len(doc.Profiles))
-	resolvedProfiles := make(map[string]Profile, len(doc.Profiles))
-	var visit func(string) (Profile, error)
-	visit = func(name string) (Profile, error) {
-		switch states[name] {
-		case 1:
-			return Profile{}, fmt.Errorf("profile inheritance cycle at %q", name)
-		case 2:
-			return resolvedProfiles[name], nil
-		}
-		spec, ok := doc.Profiles[name]
-		if !ok {
-			return Profile{}, fmt.Errorf("unknown profile %q", name)
-		}
-		states[name] = 1
-		base := compositionFromDocument(doc)
-		if spec.Extends != "" {
-			if _, ok := doc.Profiles[spec.Extends]; !ok {
-				return Profile{}, fmt.Errorf("profile %q extends unknown profile %q", name, spec.Extends)
-			}
-		}
-		if spec.Extends != "" {
-			parent, err := visit(spec.Extends)
-			if err != nil {
-				return Profile{}, err
-			}
-			base = compositionFromResolved(parent)
-		}
-		profile := resolved(name, mergeComposition(base, compositionFromProfile(spec)))
-		states[name] = 2
-		resolvedProfiles[name] = profile
-		return profile, nil
-	}
-
-	names := make([]string, 0, len(doc.Profiles))
-	for name := range doc.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	profiles := make([]Profile, 0, len(names))
-	for _, name := range names {
-		profile, err := visit(name)
-		if err != nil {
-			return nil, err
-		}
-		profiles = append(profiles, profile)
-	}
-	return profiles, nil
+	return resolveProfiles(doc, doc.Profiles)
 }
 
 type composition struct {
@@ -418,66 +382,56 @@ func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 			}
 		}
 		if hasFileProfiles {
-			fileProfiles, err := loadFileProfiles(sourceDir, profilesDir, doc.Profiles)
+			if doc.profilesDeclared {
+				return nil, errors.New("inline profiles and profiles directory cannot be used together")
+			}
+			fileProfiles, err := loadFileProfiles(profilesDir)
 			if err != nil {
 				return nil, err
 			}
-			resolved, err := resolveProfiles(doc, fileProfiles)
-			if err != nil {
-				return nil, err
-			}
-			return resolved, nil
+			return resolveProfiles(doc, fileProfiles)
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read profiles directory: %w", err)
 	}
 
 	if !doc.profilesDeclared {
 		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
 	}
 
-	names := make([]string, 0, len(doc.Profiles))
-	for name := range doc.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	profiles := make([]Profile, 0, len(names))
-	for _, name := range names {
-		p, ok := doc.Profiles[name]
-		if !ok {
-			continue
-		}
-		spec := cloneProfileSpec(p)
-		composition := mergeComposition(
-			compositionFromDocument(doc),
-			compositionFromProfile(spec),
-		)
-		profiles = append(profiles, resolved(name, composition))
-	}
-	return profiles, nil
+	return resolveProfiles(doc, doc.Profiles)
 }
 
-func loadFileProfiles(sourceDir, profilesDir string, inlineProfiles map[string]ProfileSpec) (map[string]ProfileSpec, error) {
+func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 	entries, err := os.ReadDir(profilesDir)
 	if err != nil {
 		return nil, err
 	}
 
 	result := make(map[string]ProfileSpec)
+	profileFiles := make(map[string]string)
 	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
 		name := e.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		ext := filepath.Ext(name)
+		if ext != ".yaml" && ext != ".yml" {
 			continue
 		}
-		base := name[:len(name)-5]
-		if strings.HasSuffix(base, ".yaml") {
-			base = base[:len(base)-5]
-		} else if strings.HasSuffix(base, ".yml") {
-			base = base[:len(base)-4]
+		if e.Type()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("profile file %q must be a regular file", name)
 		}
+		info, err := e.Info()
+		if err != nil {
+			return nil, fmt.Errorf("inspect profile file %q: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("profile file %q must be a regular file", name)
+		}
+		base := strings.TrimSuffix(name, ext)
 		if err := validName("profile file", base); err != nil {
-			continue
+			return nil, err
+		}
+		if previous, exists := profileFiles[base]; exists {
+			return nil, fmt.Errorf("duplicate profile %q from %q and %q", base, previous, name)
 		}
 
 		filePath := filepath.Join(profilesDir, name)
@@ -527,6 +481,7 @@ func loadFileProfiles(sourceDir, profilesDir string, inlineProfiles map[string]P
 			return nil, err
 		}
 		result[base] = spec
+		profileFiles[base] = name
 	}
 	return result, nil
 }
@@ -543,26 +498,18 @@ func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec) ([]
 		case 2:
 			return resolvedProfiles[name], nil
 		}
-		spec, fileExists := fileProfiles[name]
-		_, inlineExists := rootDoc.Profiles[name]
-		if !fileExists && !inlineExists {
+		spec, exists := fileProfiles[name]
+		if !exists {
 			return Profile{}, fmt.Errorf("unknown profile %q", name)
 		}
 		states[name] = 1
 
 		base := compositionFromDocument(rootDoc)
-		var profileSpec ProfileSpec
-		if fileExists {
-			profileSpec = cloneProfileSpec(spec)
-		} else {
-			profileSpec = rootDoc.Profiles[name]
-		}
+		profileSpec := cloneProfileSpec(spec)
 
 		ext := profileSpec.Extends
 		if ext != "" {
-			_, parentInFiles := fileProfiles[ext]
-			_, parentInInline := rootDoc.Profiles[ext]
-			if !parentInFiles && !parentInInline {
+			if _, ok := fileProfiles[ext]; !ok {
 				return Profile{}, fmt.Errorf("profile %q extends unknown profile %q", name, ext)
 			}
 			parent, err := visit(ext)
@@ -618,7 +565,7 @@ func agents(node *yaml.Node) (map[string]Agent, error) {
 		if err := validName("agent", name); err != nil {
 			return nil, err
 		}
-		values, err := mapping(node.Content[i+1], "agent "+name, "file", "config")
+		values, err := mapping(node.Content[i+1], "agent "+name, "file", "config", "model")
 		if err != nil {
 			return nil, err
 		}
@@ -633,6 +580,26 @@ func agents(node *yaml.Node) (map[string]Agent, error) {
 		}
 		if agent.Config, err = nativeMap(values["config"], "agent "+name+" config"); err != nil {
 			return nil, err
+		}
+		if configured, exists := agent.Config["model"]; exists {
+			model, ok := configured.(string)
+			if !ok || model == "" {
+				return nil, fmt.Errorf("agent %q config.model must be a non-empty string", name)
+			}
+		}
+		if v := values["model"]; v != nil {
+			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" || v.Value == "" {
+				return nil, fmt.Errorf("agent %q model must be a non-empty string", name)
+			}
+			if configured, exists := agent.Config["model"]; exists {
+				if configured.(string) != v.Value {
+					return nil, fmt.Errorf("agent %q model conflicts with config.model", name)
+				}
+			}
+			if agent.Config == nil {
+				agent.Config = map[string]any{}
+			}
+			agent.Config["model"] = v.Value
 		}
 		out[name] = agent
 	}
@@ -812,4 +779,157 @@ func validName(kind, name string) error {
 		}
 	}
 	return nil
+}
+
+// MigrateProfiles moves legacy inline profiles into profiles/*.yaml.
+// It returns false when the source has no inline profiles.
+func MigrateProfiles(sourceDir string) (bool, error) {
+	rootPath := filepath.Join(sourceDir, FileName)
+	doc, err := Load(rootPath)
+	if err != nil {
+		return false, err
+	}
+	if !doc.profilesDeclared {
+		return false, nil
+	}
+	if len(doc.Profiles) == 0 {
+		return false, errors.New("cannot migrate empty inline profiles")
+	}
+	if _, err := resolveProfiles(doc, doc.Profiles); err != nil {
+		return false, err
+	}
+
+	data, err := os.ReadFile(rootPath)
+	if err != nil {
+		return false, err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, err
+	}
+	removeMappingKey(root.Content[0], "profiles")
+	rootData, err := yaml.Marshal(root.Content[0])
+	if err != nil {
+		return false, err
+	}
+	rootTemp, err := stagedFile(sourceDir, rootData, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(rootTemp)
+
+	profilesDir := filepath.Join(sourceDir, "profiles")
+	if info, statErr := os.Stat(profilesDir); statErr == nil {
+		if !info.IsDir() {
+			return false, fmt.Errorf("migration target %s is not a directory", profilesDir)
+		}
+		existing, loadErr := loadFileProfiles(profilesDir)
+		if loadErr != nil {
+			return false, loadErr
+		}
+		if len(existing) != 0 && !reflect.DeepEqual(normalizeProfileSpecs(existing), normalizeProfileSpecs(doc.Profiles)) {
+			return false, errors.New("cannot migrate inline profiles: profiles directory already contains a different layout")
+		}
+		if len(existing) == 0 {
+			if err := os.Remove(profilesDir); err != nil {
+				return false, fmt.Errorf("remove empty profiles directory: %w", err)
+			}
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, statErr
+	}
+
+	if _, err := os.Stat(profilesDir); errors.Is(err, os.ErrNotExist) {
+		stagedDir, err := os.MkdirTemp(sourceDir, ".profiles-migrate-")
+		if err != nil {
+			return false, err
+		}
+		defer os.RemoveAll(stagedDir)
+		names := make([]string, 0, len(doc.Profiles))
+		for name := range doc.Profiles {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			profileData, err := yaml.Marshal(doc.Profiles[name])
+			if err != nil {
+				return false, fmt.Errorf("marshal profile %q: %w", name, err)
+			}
+			if err := os.WriteFile(filepath.Join(stagedDir, name+".yaml"), profileData, 0o600); err != nil {
+				return false, fmt.Errorf("stage profile %q: %w", name, err)
+			}
+		}
+		if err := os.Rename(stagedDir, profilesDir); err != nil {
+			return false, fmt.Errorf("publish profiles directory: %w", err)
+		}
+	} else if err != nil {
+		return false, err
+	}
+
+	if err := os.Rename(rootTemp, rootPath); err != nil {
+		return false, fmt.Errorf("publish migrated %s: %w", FileName, err)
+	}
+	return true, nil
+}
+
+func normalizeProfileSpecs(profiles map[string]ProfileSpec) map[string]ProfileSpec {
+	out := make(map[string]ProfileSpec, len(profiles))
+	for name, profile := range profiles {
+		profile = cloneProfileSpec(profile)
+		if len(profile.Config) == 0 {
+			profile.Config = nil
+		}
+		if len(profile.Instructions) == 0 {
+			profile.Instructions = nil
+		}
+		if len(profile.Skills) == 0 {
+			profile.Skills = nil
+		}
+		if len(profile.Plugins) == 0 {
+			profile.Plugins = nil
+		}
+		if len(profile.Agents) == 0 {
+			profile.Agents = nil
+		} else {
+			for agentName, agent := range profile.Agents {
+				if len(agent.Config) == 0 {
+					agent.Config = nil
+					profile.Agents[agentName] = agent
+				}
+			}
+		}
+		out[name] = profile
+	}
+	return out
+}
+
+func removeMappingKey(node *yaml.Node, key string) {
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			node.Content = append(node.Content[:i], node.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+func stagedFile(dir string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, ".ocp-migrate-")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err = f.Chmod(mode); err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
 }

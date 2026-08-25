@@ -2,6 +2,7 @@
 package ocp
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nando/ocp/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 const manifestName = ".ocp-manifest.json"
@@ -233,9 +235,36 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 		}
 		agents = cloneMap(agents)
 	}
+	agentSources := make(map[string][]byte, len(p.Agents))
 	for name, a := range p.Agents {
-		if a.Config != nil {
-			agents[name] = cloneMap(a.Config)
+		var sourceModel bool
+		if a.File != "" {
+			b, err := readSource(source, a.File, false)
+			if err != nil {
+				return nil, fmt.Errorf("agent %q: %w", name, err)
+			}
+			agentSources[name] = b
+			if _, sourceModel, err = agentFrontmatterModel(b); err != nil {
+				return nil, fmt.Errorf("agent %q: %w", name, err)
+			}
+		}
+
+		var base map[string]any
+		if existing, ok := agents[name]; ok {
+			var valid bool
+			base, valid = existing.(map[string]any)
+			if !valid {
+				return nil, fmt.Errorf("config.agent.%s must be an object", name)
+			}
+		}
+		merged := mergeMap(base, a.Config)
+		if sourceModel {
+			delete(merged, "model")
+		}
+		if len(merged) == 0 {
+			delete(agents, name)
+		} else {
+			agents[name] = merged
 		}
 	}
 	if len(agents) > 0 {
@@ -269,10 +298,7 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 		if a.File == "" {
 			continue
 		}
-		b, err := readSource(source, a.File, false)
-		if err != nil {
-			return nil, fmt.Errorf("agent %q: %w", name, err)
-		}
+		b := agentSources[name]
 		if err := atomicFile(filepath.Join(dest, "agents", name+".md"), b, 0o600); err != nil {
 			return nil, err
 		}
@@ -352,9 +378,59 @@ func unique(in []string) []string {
 func cloneMap(in map[string]any) map[string]any {
 	out := map[string]any{}
 	for k, v := range in {
-		out[k] = v
+		if child, ok := v.(map[string]any); ok {
+			out[k] = cloneMap(child)
+		} else {
+			out[k] = v
+		}
 	}
 	return out
+}
+
+func mergeMap(base, overlay map[string]any) map[string]any {
+	out := cloneMap(base)
+	for key, value := range overlay {
+		if child, ok := value.(map[string]any); ok {
+			if parent, ok := out[key].(map[string]any); ok {
+				out[key] = mergeMap(parent, child)
+				continue
+			}
+			out[key] = cloneMap(child)
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func agentFrontmatterModel(data []byte) (string, bool, error) {
+	lines := bytes.Split(data, []byte("\n"))
+	if len(lines) == 0 || string(bytes.TrimSuffix(lines[0], []byte("\r"))) != "---" {
+		return "", false, nil
+	}
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if string(bytes.TrimSuffix(lines[i], []byte("\r"))) == "---" {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		return "", false, errors.New("unterminated YAML frontmatter")
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(bytes.Join(lines[1:end], []byte("\n")), &values); err != nil {
+		return "", false, fmt.Errorf("invalid YAML frontmatter: %w", err)
+	}
+	value, exists := values["model"]
+	if !exists {
+		return "", false, nil
+	}
+	model, ok := value.(string)
+	if !ok || model == "" {
+		return "", false, errors.New("frontmatter model must be a non-empty string")
+	}
+	return model, true, nil
 }
 
 func readSource(root, name string, dir bool) ([]byte, error) {

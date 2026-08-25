@@ -80,6 +80,17 @@ func TestRenderActivateResetAndRunPath(t *testing.T) {
 	}
 }
 
+func TestRunConfigPathRejectsDotProfiles(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\n")
+	render(t, p, src, false)
+	for _, profile := range []string{".", ".."} {
+		if _, err := RunConfigPath(p, profile); err == nil || !strings.Contains(err.Error(), "invalid profile") {
+			t.Fatalf("RunConfigPath(%q) error = %v", profile, err)
+		}
+	}
+}
+
 func TestRenderMaterializesNativeFiles(t *testing.T) {
 	p := testPaths(t)
 	src := source(t, "version: 1\nconfig:\n  plugin: [native]\ninstructions: [guide.md]\nplugins: [added, native]\nagents:\n  helper:\n    file: agents/helper.md\n    config:\n      model: small\nskills: [skills/demo]\n")
@@ -116,6 +127,85 @@ func TestRenderMaterializesNativeFiles(t *testing.T) {
 	}
 	if native["agent"].(map[string]any)["helper"].(map[string]any)["model"] != "small" {
 		t.Fatalf("agent = %#v", native["agent"])
+	}
+}
+
+func TestRenderMergesNativeAndComposedAgentConfig(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, `version: 1
+config:
+  agent:
+    helper:
+      mode: subagent
+      permission:
+        edit: ask
+agents:
+  helper:
+    model: provider/model
+    config:
+      permission:
+        edit: allow
+`)
+	render(t, p, src, false)
+	b, err := os.ReadFile(filepath.Join(p.Current, "default", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native map[string]any
+	if err := json.Unmarshal(b, &native); err != nil {
+		t.Fatal(err)
+	}
+	helper := native["agent"].(map[string]any)["helper"].(map[string]any)
+	if helper["model"] != "provider/model" || helper["mode"] != "subagent" {
+		t.Fatalf("helper = %#v", helper)
+	}
+	if helper["permission"].(map[string]any)["edit"] != "allow" {
+		t.Fatalf("helper permission = %#v", helper["permission"])
+	}
+}
+
+func TestRenderAgentFrontmatterModelOverridesProfileModel(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nagents:\n  helper:\n    file: agents/helper.md\n    model: profile/model\n    config:\n      mode: subagent\n")
+	path := filepath.Join(src, "agents", "helper.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markdown := "---\nmodel: source/model\ndescription: helper\n---\n\nHelp.\n"
+	if err := os.WriteFile(path, []byte(markdown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	render(t, p, src, false)
+	root := filepath.Join(p.Current, "default")
+	b, err := os.ReadFile(filepath.Join(root, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native map[string]any
+	if err := json.Unmarshal(b, &native); err != nil {
+		t.Fatal(err)
+	}
+	helper := native["agent"].(map[string]any)["helper"].(map[string]any)
+	if _, exists := helper["model"]; exists {
+		t.Fatalf("frontmatter model competed with native config: %#v", helper)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "agents", "helper.md")); err != nil || string(got) != markdown {
+		t.Fatalf("agent Markdown = %q, %v", got, err)
+	}
+}
+
+func TestRenderRejectsMalformedAgentFrontmatter(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nagents:\n  helper:\n    file: agents/helper.md\n")
+	path := filepath.Join(src, "agents", "helper.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nmodel: [broken\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(RenderOptions{Paths: p, Source: src}); err == nil || !strings.Contains(err.Error(), "invalid YAML frontmatter") {
+		t.Fatalf("Render error = %v", err)
 	}
 }
 

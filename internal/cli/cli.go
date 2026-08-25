@@ -182,22 +182,66 @@ func (r *Runner) checkRepoAccess(repoURL string) error {
 }
 
 func (r *Runner) setup(p ocp.Paths, args []string) error {
-	if s, e := ocp.LoadState(p); e != nil {
-		return e
-	} else if s != nil {
-		return errors.New("OCP is already set up; use apply, sync, or reset first")
-	}
 	autoFlag := flag.NewFlagSet("setup", flag.ContinueOnError)
 	autoFlag.SetOutput(io.Discard)
 	noAuto := autoFlag.Bool("no-auto-commit", false, "disable automatic commits")
 	force := autoFlag.Bool("force", false, "overwrite generated drift")
+	migrateProfiles := autoFlag.Bool("migrate-profiles", false, "move inline profiles into profiles/*.yaml")
 	repo := autoFlag.String("repo", "", "repository URL for non-interactive mode")
 	src := autoFlag.String("source", "", "source directory for non-interactive mode")
 	if err := autoFlag.Parse(args); err != nil {
 		return err
 	}
-	flagArgs := autoFlag.Args()
-	hasFlags := len(flagArgs) > 0 || *repo != "" || !r.tty() || *src != ""
+	if autoFlag.NArg() != 0 {
+		return fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " "))
+	}
+	state, err := ocp.LoadState(p)
+	if err != nil {
+		return err
+	}
+	if state != nil {
+		if !*migrateProfiles {
+			return errors.New("OCP is already set up; use apply, sync, or reset first")
+		}
+		if *src != "" || *repo != "" {
+			return errors.New("setup --migrate-profiles uses the configured source; do not pass --source or --repo")
+		}
+		release, err := lock(p)
+		if err != nil {
+			return err
+		}
+		defer release()
+		changed, err := config.MigrateProfiles(state.Source)
+		if err != nil {
+			return fmt.Errorf("migrate profiles: %w", err)
+		}
+		if _, err := r.install(p, state.Source, state.AutoCommit, false, *force, false); err != nil {
+			return err
+		}
+		if changed {
+			r.c.Success("Migrated inline profiles into " + filepath.Join(state.Source, "profiles"))
+		} else {
+			r.c.Muted("No inline profiles to migrate")
+		}
+		return nil
+	}
+	if *migrateProfiles {
+		if *src == "" {
+			return errors.New("setup --migrate-profiles requires --source before initial setup")
+		}
+		if *repo != "" {
+			return errors.New("setup --migrate-profiles cannot be combined with --repo")
+		}
+		release, err := lock(p)
+		if err != nil {
+			return err
+		}
+		defer release()
+		if _, err := config.MigrateProfiles(*src); err != nil {
+			return fmt.Errorf("migrate profiles: %w", err)
+		}
+	}
+	hasFlags := *migrateProfiles || *repo != "" || !r.tty() || *src != ""
 	if hasFlags {
 		source := *src
 		if source == "" && *repo != "" {

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,39 @@ func TestResolveRejectsCycleAndUnknownParent(t *testing.T) {
 		if _, err := Resolve(loadText(t, text)); err == nil {
 			t.Errorf("Resolve(%q) succeeded", text)
 		}
+	}
+}
+
+func TestAgentModelShorthandNormalizesIntoConfig(t *testing.T) {
+	doc := loadText(t, "version: 1\nagents:\n  worker:\n    model: provider/model\n")
+	profiles, err := Resolve(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profiles[0].Agents["worker"].Config["model"]; got != "provider/model" {
+		t.Fatalf("model = %v, want provider/model", got)
+	}
+}
+
+func TestAgentModelShorthandRejectsConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	text := "version: 1\nagents:\n  worker:\n    model: one\n    config:\n      model: two\n"
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "conflicts with config.model") {
+		t.Fatalf("Load error = %v", err)
+	}
+}
+
+func TestAgentModelShorthandRejectsNonStringConfigModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	text := "version: 1\nagents:\n  worker:\n    model: one\n    config:\n      model: [two]\n"
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "config.model must be a non-empty string") {
+		t.Fatalf("Load error = %v", err)
 	}
 }
 
@@ -295,6 +329,114 @@ func TestResolveFromDirBackwardCompatibleWithoutProfilesDir(t *testing.T) {
 	}
 }
 
+func TestResolveFromDirPreservesInlineInheritance(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, "version: 1\nconfig:\n  shared: root\nprofiles:\n  base:\n    config:\n      inherited: yes\n  child:\n    extends: base\n    config:\n      own: yes\n", nil)
+	profiles, err := doc.ResolveFromDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := profiles[1]
+	if child.Config["shared"] != "root" || child.Config["inherited"] != "yes" || child.Config["own"] != "yes" {
+		t.Fatalf("child config = %#v", child.Config)
+	}
+}
+
+func TestResolveFromDirSupportsYMLAndRejectsDuplicateNames(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, "version: 1\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profilesDir, "deep.yml"), []byte("config:\n  model: deep\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	profiles, err := doc.ResolveFromDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].Name != "deep" {
+		t.Fatalf("profiles = %#v", profiles)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "profiles", "deep.yaml"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), "duplicate profile") {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+}
+
+func TestResolveFromDirRejectsInvalidAndMixedProfiles(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, "version: 1\nprofiles:\n  inline: {}\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profilesDir, "file.yaml"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), "cannot be used together") {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+
+	doc, dir = loadWithSourceDir(t, "version: 1\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profilesDir, "bad name.yaml"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), "invalid profile file name") {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+}
+
+func TestResolveFromDirRejectsMalformedAndUnsafeProfileFiles(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, "version: 1\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profilesDir, "broken.yaml"), []byte("config: [\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), `parse profile file "broken.yaml"`) {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+
+	doc, dir = loadWithSourceDir(t, "version: 1\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(dir, "outside.yaml")
+		if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(profilesDir, "linked.yaml")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), "must be a regular file") {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+}
+
+func TestResolveFromDirRejectsInvalidProfilesPath(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, "version: 1\n", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "profiles"), []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := doc.ResolveFromDir(dir); err == nil || !strings.Contains(err.Error(), "read profiles directory") {
+		t.Fatalf("ResolveFromDir error = %v", err)
+	}
+}
+
 func TestResolveFromDirImplicitDefaultNoProfilesKeyOrDir(t *testing.T) {
 	doc, dir := loadWithSourceDir(t, "version: 1\nconfig:\n  model: minimal\n", nil)
 	profiles, err := doc.ResolveFromDir(dir)
@@ -338,5 +480,100 @@ config:
 	})
 	if _, err := doc.ResolveFromDir(dir); err == nil {
 		t.Error("expected cycle error")
+	}
+}
+
+func TestMigrateProfilesPreservesResolution(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, `version: 1
+config:
+  shared: root
+profiles:
+  default:
+    skills:
+      - https://github.com/example/tool@main
+    agents:
+      worker:
+        model: base/model
+  deep:
+    extends: default
+    config:
+      model: deep/model
+`, nil)
+	before, err := doc.ResolveFromDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := MigrateProfiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("MigrateProfiles reported no change")
+	}
+	migrated, err := Load(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := migrated.ResolveFromDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("profiles before=%#v after=%#v", before, after)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("profiles before=%#v after=%#v", before, after)
+	}
+	root, err := os.ReadFile(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(root), "profiles:") {
+		t.Fatalf("migrated root still contains profiles: %s", root)
+	}
+	for _, name := range []string{"default.yaml", "deep.yaml"} {
+		if _, err := os.Stat(filepath.Join(dir, "profiles", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMigrateProfilesRejectsDifferentFileLayout(t *testing.T) {
+	_, dir := loadWithSourceDir(t, "version: 1\nprofiles:\n  default: {}\n", func(dir string) {
+		profilesDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(profilesDir, "other.yaml"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := MigrateProfiles(dir); err == nil || !strings.Contains(err.Error(), "different layout") {
+		t.Fatalf("MigrateProfiles error = %v", err)
+	}
+}
+
+func TestMigrateProfilesRecoversAfterProfilesPublish(t *testing.T) {
+	inline := "version: 1\nprofiles:\n  default:\n    config: {}\n  deep:\n    extends: default\n"
+	_, dir := loadWithSourceDir(t, inline, nil)
+	if _, err := MigrateProfiles(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(inline), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := MigrateProfiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("MigrateProfiles did not finish interrupted migration")
+	}
+	doc, err := Load(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.ResolveFromDir(dir); err != nil {
+		t.Fatal(err)
 	}
 }

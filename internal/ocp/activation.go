@@ -169,7 +169,7 @@ func RunConfigPath(p Paths, profile string) (string, error) {
 func ConfigPath(p Paths, profile string) (string, error) { return RunConfigPath(p, profile) }
 
 func profileExists(p Paths, profile string) error {
-	if profile == "" || filepath.Base(profile) != profile {
+	if profile == "" || profile == "." || profile == ".." || filepath.Base(profile) != profile {
 		return fmt.Errorf("invalid profile %q", profile)
 	}
 	info, err := os.Stat(filepath.Join(p.Current, profile))

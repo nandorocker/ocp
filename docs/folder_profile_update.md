@@ -111,9 +111,10 @@ Profiles live in:
 ~/.config/ocp/profiles/
 ```
 
-Each `*.yaml` file represents one profile.
+Each `*.yaml` or `*.yml` file represents one profile.
 
-The filename without `.yaml` is the profile name.
+The filename without its YAML extension is the profile name. Defining both
+`deep.yaml` and `deep.yml` is an error.
 
 Examples:
 
@@ -142,12 +143,10 @@ config:
 
 agents:
   implementer:
-    config:
-      model: openrouter/provider/strong-coding-model
+    model: openrouter/provider/strong-coding-model
 
   reviewer:
-    config:
-      model: anthropic/provider/reviewer-model
+    model: anthropic/provider/reviewer-model
 
 skills:
   - https://github.com/example/deep-research-skill

@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
+	"strings"
 
 	"github.com/nando/ocp/internal/config"
 	"gopkg.in/yaml.v3"
@@ -68,12 +68,12 @@ func ListOPMProfiles(profileDir string) ([]string, error) {
 
 // ImportProfileData holds parsed data from a single OPM profile directory.
 type ImportProfileData struct {
-	Name     string         `yaml:"name"`
-	Root     string         `yaml:"-"`
-	Config   map[string]any `yaml:"config"`
+	Name     string            `yaml:"name"`
+	Root     string            `yaml:"-"`
+	Config   map[string]any    `yaml:"config"`
 	Agents   map[string]string `yaml:"agents"` // name -> filename
-	Guide    string         `yaml:"guide,omitempty"`
-	AgentDir string         `yaml:"-"`     // actual agent dir name found on disk ("agent" or "agents")
+	Guide    string            `yaml:"guide,omitempty"`
+	AgentDir string            `yaml:"-"` // actual agent dir name found on disk ("agent" or "agents")
 }
 
 func agentDir(root string) string {
@@ -127,7 +127,13 @@ func ReadProfileData(root string) (*ImportProfileData, error) {
 				if ag.IsDir() || filepath.Ext(ag.Name()) != ".md" {
 					continue
 				}
+				if ag.Type()&os.ModeSymlink != 0 {
+					return nil, fmt.Errorf("agent file %q must be a regular file", ag.Name())
+				}
 				name := ag.Name()[:len(ag.Name())-3]
+				if !validImportName(name) {
+					return nil, fmt.Errorf("invalid imported agent name %q", name)
+				}
 				data.Agents[name] = ag.Name()
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {
@@ -150,138 +156,203 @@ func cloneM(m map[string]any) map[string]any {
 	return out
 }
 
-// MergeProfiles reads multiple OPM profile directories and merges them into
-// a single OCP source tree under the given source path. Global resources
-// (skills, agents, instructions) are collected at root-level. Each selected
-// profile retains its own native config and may override globals via
-// per-profile declarations.
+// MergeProfiles converts multiple OPM profiles into independent OCP profile
+// files while reusing only byte-identical agent sources.
 func MergeProfiles(data []*ImportProfileData, source string, force bool) error {
+	if len(data) == 0 {
+		return errors.New("no profile data to merge")
+	}
+	parent := filepath.Dir(source)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	staged, err := os.MkdirTemp(parent, ".ocp-import-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staged)
+	if err := mergeProfilesInto(data, staged); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(staged)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := collision(filepath.Join(source, entry.Name()), force); err != nil {
+			return err
+		}
+	}
+	backup, err := os.MkdirTemp(parent, ".ocp-import-backup-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(backup)
+	ordered := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name() != "ocp.yaml" {
+			ordered = append(ordered, entry)
+		}
+	}
+	for _, entry := range entries {
+		if entry.Name() == "ocp.yaml" {
+			ordered = append(ordered, entry)
+			break
+		}
+	}
+	type publication struct {
+		name   string
+		hadOld bool
+	}
+	var published []publication
+	rollback := func() {
+		for index := len(published) - 1; index >= 0; index-- {
+			item := published[index]
+			destination := filepath.Join(source, item.name)
+			_ = os.RemoveAll(destination)
+			if item.hadOld {
+				_ = os.Rename(filepath.Join(backup, item.name), destination)
+			}
+		}
+	}
+	for _, entry := range ordered {
+		name := entry.Name()
+		destination := filepath.Join(source, name)
+		hadOld := exists(destination)
+		if hadOld {
+			if err := os.Rename(destination, filepath.Join(backup, name)); err != nil {
+				rollback()
+				return fmt.Errorf("preserve existing %s: %w", name, err)
+			}
+		}
+		if err := os.Rename(filepath.Join(staged, name), destination); err != nil {
+			if hadOld {
+				_ = os.Rename(filepath.Join(backup, name), destination)
+			}
+			rollback()
+			return fmt.Errorf("publish imported %s: %w", name, err)
+		}
+		published = append(published, publication{name: name, hadOld: hadOld})
+	}
+	return nil
+}
+
+func mergeProfilesInto(data []*ImportProfileData, source string) error {
 	if len(data) == 0 {
 		return errors.New("no profile data to merge")
 	}
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		return err
 	}
-
-	globalSkills := make(map[string]bool)
-	globalPlugins := make(map[string]bool)
-	var globalInstructions []string
-	seenInstructions := map[string]bool{}
-	guideSource := ""
-
-	orderedNames := make([]string, 0, len(data))
+	seenProfiles := map[string]bool{}
 	for _, d := range data {
-		orderedNames = append(orderedNames, d.Name)
-		if raw, ok := d.Config["skills"]; ok {
-			if list, ok := raw.([]any); ok {
-				for _, s := range list {
-					if sk, ok := s.(string); ok {
-						globalSkills[sk] = true
-					}
-				}
-			}
+		if !validImportName(d.Name) {
+			return fmt.Errorf("invalid imported profile name %q", d.Name)
 		}
-		if instRaw, ok := d.Config["instructions"]; ok {
-			if instList, ok := instRaw.([]any); ok {
-				for _, inst := range instList {
-					if s, ok := inst.(string); ok {
-						if seenInstructions[s] {
-							continue
-						}
-						seenInstructions[s] = true
-						globalInstructions = append(globalInstructions, s)
-					}
-				}
-			}
+		if seenProfiles[d.Name] {
+			return fmt.Errorf("duplicate imported profile %q", d.Name)
 		}
-		if plRaw, ok := d.Config["plugins"]; ok {
-			if plist, ok := plRaw.([]any); ok {
-				for _, p := range plist {
-					if ps, ok := p.(string); ok {
-						globalPlugins[ps] = true
-					}
-				}
-			}
-		}
-		if guideSource == "" && d.Guide != "" {
-			guideSource = d.Root
-		}
+		seenProfiles[d.Name] = true
 	}
 
-	doc := &config.Document{Version: 1}
-
-	if len(globalSkills) > 0 {
-		skills := make([]config.Skill, 0, len(globalSkills))
-		for sk := range globalSkills {
-			skills = append(skills, config.Skill{Source: sk})
-		}
-		sort.Slice(skills, func(i, j int) bool { return skills[i].Source < skills[j].Source })
-		doc.Skills = skills
-	}
-	doc.Instructions = globalInstructions
-
-	if len(globalPlugins) > 0 {
-		plugins := make([]string, 0, len(globalPlugins))
-		for p := range globalPlugins {
-			plugins = append(plugins, p)
-		}
-		sort.Strings(plugins)
-		doc.Plugins = plugins
-	}
-
-	// Build per-file profile declarations.
 	type profileFileEntry struct {
-		Extends      string            `yaml:"extends,omitempty"`
-		Config       map[string]any    `yaml:"config,omitempty"`
-		Instructions []string          `yaml:"instructions,omitempty"`
-		Skills       []config.Skill    `yaml:"skills,omitempty"`
-		Plugins      []string          `yaml:"plugins,omitempty"`
+		Config       map[string]any          `yaml:"config,omitempty"`
+		Instructions []string                `yaml:"instructions,omitempty"`
+		Skills       []string                `yaml:"skills,omitempty"`
 		Agents       map[string]config.Agent `yaml:"agents,omitempty"`
 	}
 
-	profileDir := filepath.Join(source, "profiles")
-	for idx, dName := range orderedNames {
-		d := data[idx]
-		noExcl := cloneM(d.Config)
-		delete(noExcl, "skills")
-		delete(noExcl, "instructions")
-		delete(noExcl, "plugins")
-		for k := range d.Agents {
-			delete(noExcl, k)
+	agentContents := map[string][]byte{}
+	agentDestinations := make([]map[string]string, len(data))
+	for index, d := range data {
+		agentDestinations[index] = map[string]string{}
+		for name, filename := range d.Agents {
+			contents, err := os.ReadFile(filepath.Join(d.Root, d.AgentDir, filename))
+			if err != nil {
+				return fmt.Errorf("read agent %s from profile %s: %w", filename, d.Name, err)
+			}
+			destination := filename
+			if existing, used := agentContents[destination]; used && !bytes.Equal(existing, contents) {
+				extension := filepath.Ext(filename)
+				base := strings.TrimSuffix(filename, extension)
+				destination = base + "--" + d.Name + extension
+				for suffix := 2; ; suffix++ {
+					if existing, used = agentContents[destination]; !used || bytes.Equal(existing, contents) {
+						break
+					}
+					destination = fmt.Sprintf("%s--%s--%d%s", base, d.Name, suffix, extension)
+				}
+			}
+			agentContents[destination] = contents
+			agentDestinations[index][name] = destination
 		}
+	}
+	if len(agentContents) > 0 {
+		agentsDir := filepath.Join(source, "agents")
+		if err := os.MkdirAll(agentsDir, 0o700); err != nil {
+			return err
+		}
+		for filename, contents := range agentContents {
+			destination := filepath.Join(agentsDir, filename)
+			if err := collision(destination, true); err != nil {
+				return err
+			}
+			if err := os.WriteFile(destination, contents, 0o600); err != nil {
+				return fmt.Errorf("write agent %s: %w", filename, err)
+			}
+		}
+	}
 
-		entry := profileFileEntry{}
-		if len(noExcl) > 0 {
-			entry.Config = noExcl
-		}
-		if len(d.Agents) > 0 {
+	profileDir := filepath.Join(source, "profiles")
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		return err
+	}
+	for index, d := range data {
+		entry := profileFileEntry{Config: cloneM(d.Config)}
+		if len(agentDestinations[index]) > 0 {
 			entry.Agents = make(map[string]config.Agent)
-			for aname, afname := range d.Agents {
-				entry.Agents[aname] = config.Agent{File: "./agents/" + afname}
+			for name, filename := range agentDestinations[index] {
+				entry.Agents[name] = config.Agent{File: "./agents/" + filename}
 			}
 		}
 		if d.Guide != "" {
-			entry.Instructions = []string{d.Guide}
+			guidePath := filepath.Join("instructions", d.Name+".md")
+			if err := copyFile(filepath.Join(source, guidePath), filepath.Join(d.Root, "AGENTS.md"), true); err != nil {
+				return fmt.Errorf("copy instructions for profile %s: %w", d.Name, err)
+			}
+			entry.Instructions = []string{"./" + filepath.ToSlash(guidePath)}
 		}
-		if idx > 0 {
-			entry.Extends = orderedNames[idx-1]
-		}
-		if entry.Config == nil && entry.Agents == nil && len(entry.Instructions) == 0 && len(entry.Skills) == 0 && len(entry.Plugins) == 0 {
-			continue
-		}
-		if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		if skills, err := os.ReadDir(filepath.Join(d.Root, "skills")); err == nil {
+			for _, skill := range skills {
+				if !skill.IsDir() {
+					continue
+				}
+				relative := filepath.Join("skills", d.Name, skill.Name())
+				if err := copyTree(filepath.Join(source, relative), filepath.Join(d.Root, "skills", skill.Name()), true); err != nil {
+					return fmt.Errorf("copy skill %s for profile %s: %w", skill.Name(), d.Name, err)
+				}
+				entry.Skills = append(entry.Skills, "./"+filepath.ToSlash(relative))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		profData, err := yaml.Marshal(&entry)
 		if err != nil {
-			return fmt.Errorf("marshal profile %q: %w", dName, err)
+			return fmt.Errorf("marshal profile %q: %w", d.Name, err)
 		}
-		if err := os.WriteFile(filepath.Join(profileDir, dName+".yaml"), profData, 0o600); err != nil {
-			return fmt.Errorf("write profile %q: %w", dName, err)
+		profilePath := filepath.Join(profileDir, d.Name+".yaml")
+		if err := collision(profilePath, true); err != nil {
+			return err
+		}
+		if err := os.WriteFile(profilePath, profData, 0o600); err != nil {
+			return fmt.Errorf("write profile %q: %w", d.Name, err)
 		}
 	}
 
-	y, err := yaml.Marshal(doc)
+	y, err := yaml.Marshal(&config.Document{Version: 1})
 	if err != nil {
 		return err
 	}
@@ -289,71 +360,19 @@ func MergeProfiles(data []*ImportProfileData, source string, force bool) error {
 		return err
 	}
 
-	// Write resources deterministically.
-	if guideSource != "" && exists(filepath.Join(guideSource, "AGENTS.md")) {
-		if err := copyFile(filepath.Join(source, "AGENTS.md"), filepath.Join(guideSource, "AGENTS.md"), force); err != nil {
-			return err
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Join(source, "agents"), 0o700); err != nil {
-		return err
-	}
-	for _, d := range data {
-		if d.AgentDir == "" {
-			continue
-		}
-		srcDir := filepath.Join(d.Root, d.AgentDir)
-		for _, fname := range d.Agents {
-			dst := filepath.Join(source, "agents", fname)
-			if err := copyFile(dst, filepath.Join(srcDir, fname), force); err != nil {
-				return fmt.Errorf("copy agent %s: %w", fname, err)
-			}
-		}
-	}
-
-	// Collect unique skill dirs.
-	skillDirSet := make(map[string]bool)
-	for _, d := range data {
-		if entries, e := os.ReadDir(filepath.Join(d.Root, "skills")); e == nil {
-			for _, sk := range entries {
-				if !sk.IsDir() {
-					continue
-				}
-				skillDirSet[sk.Name()] = true
-			}
-		}
-	}
-	skillDirs := make([]string, 0, len(skillDirSet))
-	for dn := range skillDirSet {
-		skillDirs = append(skillDirs, dn)
-	}
-	sort.Strings(skillDirs)
-
-	if len(skillDirs) > 0 {
-		for _, d := range data {
-			if entries, e := os.ReadDir(filepath.Join(d.Root, "skills")); e == nil {
-				for _, dn := range skillDirs {
-					found := false
-					for _, sk := range entries {
-						if sk.Name() == dn {
-							found = true
-							break
-						}
-					}
-					if !found {
-						continue
-					}
-					dst := filepath.Join(source, "skills", dn)
-					if err := copyTree(dst, filepath.Join(d.Root, "skills", dn), force); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-
 	return nil
+}
+
+func validImportName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml")
 }
 
 // ImportOPM delegates to Import after locating the selected OPM profile.

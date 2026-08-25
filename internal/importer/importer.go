@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -56,6 +57,26 @@ func Import(input, source string, force bool) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", jsonPath, err)
 	}
+	agentDirName := agentDir(root)
+	var agentEntries []os.DirEntry
+	if agentDirName != "" {
+		agentEntries, err = os.ReadDir(filepath.Join(root, agentDirName))
+		if err != nil {
+			return err
+		}
+		for _, entry := range agentEntries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+				continue
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("agent file %q must be a regular file", entry.Name())
+			}
+			name := strings.TrimSuffix(entry.Name(), ".md")
+			if !validImportName(name) {
+				return fmt.Errorf("invalid imported agent name %q", name)
+			}
+		}
+	}
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		return err
 	}
@@ -72,23 +93,18 @@ func Import(input, source string, force bool) error {
 		}
 		doc.Instructions = []string{"./AGENTS.md"}
 	}
-	agentDirName := agentDir(root)
 	if agentDirName != "" {
-		if entries, err := os.ReadDir(filepath.Join(root, agentDirName)); err == nil {
-			doc.Agents = map[string]agent{}
-			for _, e := range entries {
-				if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
-					continue
-				}
-				name := e.Name()[:len(e.Name())-3]
-				dst := filepath.Join(source, "agents", e.Name())
-				if err := copyFile(dst, filepath.Join(root, agentDirName, e.Name()), force); err != nil {
-					return err
-				}
-				doc.Agents[name] = agent{File: "./agents/" + e.Name()}
+		doc.Agents = map[string]agent{}
+		for _, e := range agentEntries {
+			if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+				continue
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			name := e.Name()[:len(e.Name())-3]
+			dst := filepath.Join(source, "agents", e.Name())
+			if err := copyFile(dst, filepath.Join(root, agentDirName, e.Name()), force); err != nil {
+				return err
+			}
+			doc.Agents[name] = agent{File: "./agents/" + e.Name()}
 		}
 	}
 	if entries, err := os.ReadDir(filepath.Join(root, "skills")); err == nil {
@@ -109,7 +125,7 @@ func Import(input, source string, force bool) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(source, "ocp.yaml"), y, 0o600)
+	return atomicImportFile(filepath.Join(source, "ocp.yaml"), y, 0o600)
 }
 
 func normalizeNumbers(value map[string]any) (map[string]any, error) {
@@ -189,7 +205,32 @@ func copyFile(dst, src string, force bool) error {
 	if e = os.MkdirAll(filepath.Dir(dst), 0o700); e != nil {
 		return e
 	}
-	return os.WriteFile(dst, b, 0o600)
+	return atomicImportFile(dst, b, 0o600)
+}
+
+func atomicImportFile(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".import-")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(mode); err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 func copyTree(dst, src string, force bool) error {
 	if exists(dst) {
