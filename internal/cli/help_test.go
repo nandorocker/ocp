@@ -40,6 +40,43 @@ func TestGlobalHelpDoesNotResolvePaths(t *testing.T) {
 	}
 }
 
+func TestVersionDoesNotResolvePaths(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		version string
+		want    string
+	}{
+		{name: "flag", args: []string{"--version"}, version: "v1.2.3", want: "ocp v1.2.3\n"},
+		{name: "command", args: []string{"version"}, version: "v1.2.3", want: "ocp v1.2.3\n"},
+		{name: "default", args: []string{"--version"}, want: "ocp dev\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			r := helpRunner(&out)
+			r.Version = tc.version
+			if err := r.Run(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if got := out.String(); got != tc.want {
+				t.Errorf("output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVersionRejectsExtraArguments(t *testing.T) {
+	for _, args := range [][]string{{"--version", "extra"}, {"version", "extra"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var out bytes.Buffer
+			err := helpRunner(&out).Run(args)
+			if err == nil || !strings.Contains(err.Error(), "version: unexpected arguments: extra") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
 func TestCommandHelpDoesNotResolvePaths(t *testing.T) {
 	for _, args := range [][]string{{"help", "setup"}, {"setup", "--help"}, {"setup", "-h"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {

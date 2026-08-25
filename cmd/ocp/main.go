@@ -8,8 +8,10 @@ import (
 	"github.com/nando/ocp/internal/cli"
 )
 
+var version = "dev"
+
 func main() {
-	err := (&cli.Runner{}).Run(os.Args[1:])
+	err := (&cli.Runner{Version: version}).Run(os.Args[1:])
 	if err == nil {
 		return
 	}

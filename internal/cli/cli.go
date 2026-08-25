@@ -41,6 +41,7 @@ type Runner struct {
 	In       io.Reader
 	Out, Err io.Writer
 	OpenCode string
+	Version  string
 	Paths    func() (ocp.Paths, error)
 	Getwd    func() (string, error)
 	Exec     func(string, []string, []string) error
@@ -63,6 +64,9 @@ func (r *Runner) defaults() {
 	if r.OpenCode == "" {
 		r.OpenCode = "opencode"
 	}
+	if r.Version == "" {
+		r.Version = "dev"
+	}
 	if r.Paths == nil {
 		r.Paths = ocp.DefaultPaths
 	}
@@ -81,6 +85,13 @@ func (r *Runner) defaults() {
 // Run dispatches a single OCP invocation.
 func (r *Runner) Run(args []string) error {
 	r.defaults()
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "version") {
+		if err := parse("version", args[1:], func(*flag.FlagSet) {}); err != nil {
+			return err
+		}
+		fmt.Fprintf(r.Out, "ocp %s\n", r.Version)
+		return nil
+	}
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" && len(args) == 1 {
 		r.help()
 		return nil

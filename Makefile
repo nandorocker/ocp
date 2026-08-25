@@ -1,6 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 TARGET ?= ocp
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: install uninstall clean
 
@@ -18,7 +19,7 @@ uninstall:
 	rm -f "$(BINDIR)/$(TARGET)"
 
 build:
-	go build -o "$(TARGET)" ./cmd/ocp
+	go build -ldflags "-X main.version=$(VERSION)" -o "$(TARGET)" ./cmd/ocp
 
 clean:
 	rm -f "$(TARGET)"
