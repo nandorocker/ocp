@@ -28,6 +28,36 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("child exited with status %d", e.Code) }
 
+// UsageError reports invalid command-line syntax with the conventional exit code 2.
+type UsageError struct {
+	Err     error
+	Command string
+}
+
+func (e *UsageError) Error() string {
+	help := "ocp --help"
+	if e.Command != "" {
+		help = "ocp help " + e.Command
+	}
+	return fmt.Sprintf("%s\nRun '%s' for usage.", e.Err, help)
+}
+func (e *UsageError) Unwrap() error { return e.Err }
+
+func usageError(err error) error {
+	return commandUsageError("", err)
+}
+
+func commandUsageError(command string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var usage *UsageError
+	if errors.As(err, &usage) {
+		return err
+	}
+	return &UsageError{Err: err, Command: command}
+}
+
 type installResult struct {
 	Source   string
 	Profiles []string
@@ -41,6 +71,7 @@ type Runner struct {
 	In       io.Reader
 	Out, Err io.Writer
 	OpenCode string
+	Version  string
 	Paths    func() (ocp.Paths, error)
 	Getwd    func() (string, error)
 	Exec     func(string, []string, []string) error
@@ -63,6 +94,9 @@ func (r *Runner) defaults() {
 	if r.OpenCode == "" {
 		r.OpenCode = "opencode"
 	}
+	if r.Version == "" {
+		r.Version = "dev"
+	}
 	if r.Paths == nil {
 		r.Paths = ocp.DefaultPaths
 	}
@@ -81,9 +115,50 @@ func (r *Runner) defaults() {
 // Run dispatches a single OCP invocation.
 func (r *Runner) Run(args []string) error {
 	r.defaults()
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+	for len(args) > 0 && args[0] == "--no-color" {
+		color.Disable()
+		args = args[1:]
+	}
+	if len(args) == 0 {
 		r.help()
 		return nil
+	}
+	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if c := commandByName(args[0]); c != nil {
+			r.commandHelp(c)
+			return nil
+		}
+	}
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "version") {
+		if err := parse("version", args[1:], func(*flag.FlagSet) {}); err != nil {
+			return err
+		}
+		fmt.Fprintf(r.Out, "ocp %s\n", r.Version)
+		return nil
+	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" && len(args) == 1 {
+		if len(args) != 1 {
+			return usageError(errors.New("help does not accept extra arguments"))
+		}
+		r.help()
+		return nil
+	}
+	if args[0] == "help" {
+		if len(args) != 2 {
+			return usageError(errors.New("help accepts exactly one command"))
+		}
+		c := commandByName(args[1])
+		if c == nil {
+			return unknownCommand(args[1])
+		}
+		r.commandHelp(c)
+		return nil
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return usageError(fmt.Errorf("unknown global option %q", args[0]))
+	}
+	if commandByName(args[0]) == nil {
+		return unknownCommand(args[0])
 	}
 	p, err := r.Paths()
 	if err != nil {
@@ -111,22 +186,18 @@ func (r *Runner) Run(args []string) error {
 	case "upgrade":
 		fmt.Fprintln(r.Err, "upgrade is deferred and not implemented in this MVP")
 		return &ExitError{Code: 2}
-	default:
-		return fmt.Errorf("unknown command %q (run 'ocp --help')", args[0])
 	}
-}
-func (r *Runner) help() {
-	fmt.Fprint(r.Out, "Usage: ocp <command>\n\nCommands: setup, sync, apply, use <profile>, run <profile> [args...], list, status, import [...], upgrade [skill <name>], reset\n")
+	return nil
 }
 func parse(name string, args []string, configure func(*flag.FlagSet)) error {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	configure(f)
 	if err := f.Parse(args); err != nil {
-		return err
+		return commandUsageError(name, err)
 	}
 	if f.NArg() != 0 {
-		return fmt.Errorf("%s: unexpected arguments: %s", name, strings.Join(f.Args(), " "))
+		return commandUsageError(name, fmt.Errorf("%s: unexpected arguments: %s", name, strings.Join(f.Args(), " ")))
 	}
 	return nil
 }
@@ -184,26 +255,23 @@ func (r *Runner) checkRepoAccess(repoURL string) error {
 func (r *Runner) setup(p ocp.Paths, args []string) error {
 	autoFlag := flag.NewFlagSet("setup", flag.ContinueOnError)
 	autoFlag.SetOutput(io.Discard)
-	noAuto := autoFlag.Bool("no-auto-commit", false, "disable automatic commits")
-	force := autoFlag.Bool("force", false, "overwrite generated drift")
-	migrateProfiles := autoFlag.Bool("migrate-profiles", false, "move inline profiles into profiles/*.yaml")
-	repo := autoFlag.String("repo", "", "repository URL for non-interactive mode")
-	src := autoFlag.String("source", "", "source directory for non-interactive mode")
+	var options setupOptions
+	configureSetup(autoFlag, &options)
 	if err := autoFlag.Parse(args); err != nil {
-		return err
+		return commandUsageError("setup", err)
 	}
 	if autoFlag.NArg() != 0 {
-		return fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " "))
+		return commandUsageError("setup", fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " ")))
 	}
 	state, err := ocp.LoadState(p)
 	if err != nil {
 		return err
 	}
 	if state != nil {
-		if !*migrateProfiles {
+		if !options.migrate {
 			return errors.New("OCP is already set up; use apply, sync, or reset first")
 		}
-		if *src != "" || *repo != "" {
+		if options.source != "" || options.repo != "" {
 			return errors.New("setup --migrate-profiles uses the configured source; do not pass --source or --repo")
 		}
 		release, err := lock(p)
@@ -215,7 +283,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		if err != nil {
 			return fmt.Errorf("migrate profiles: %w", err)
 		}
-		if _, err := r.install(p, state.Source, state.AutoCommit, false, *force, false); err != nil {
+		if _, err := r.install(p, state.Source, state.AutoCommit, false, options.force, false); err != nil {
 			return err
 		}
 		if changed {
@@ -225,11 +293,11 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		}
 		return nil
 	}
-	if *migrateProfiles {
-		if *src == "" {
+	if options.migrate {
+		if options.source == "" {
 			return errors.New("setup --migrate-profiles requires --source before initial setup")
 		}
-		if *repo != "" {
+		if options.repo != "" {
 			return errors.New("setup --migrate-profiles cannot be combined with --repo")
 		}
 		release, err := lock(p)
@@ -237,21 +305,21 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 			return err
 		}
 		defer release()
-		if _, err := config.MigrateProfiles(*src); err != nil {
+		if _, err := config.MigrateProfiles(options.source); err != nil {
 			return fmt.Errorf("migrate profiles: %w", err)
 		}
 	}
-	hasFlags := *migrateProfiles || *repo != "" || !r.tty() || *src != ""
+	hasFlags := options.migrate || options.repo != "" || !r.tty() || options.source != ""
 	if hasFlags {
-		source := *src
-		if source == "" && *repo != "" {
+		source := options.source
+		if source == "" && options.repo != "" {
 			var err error
-			source, err = filepath.Abs(*repo)
+			source, err = filepath.Abs(options.repo)
 			if err != nil {
 				return err
 			}
 		}
-		return r.setupNonInteractive(p, source, *repo, *noAuto, *force)
+		return r.setupNonInteractive(p, source, options.repo, options.noAuto, options.force)
 	}
 	source := p.OCPSrc
 	sourceExplicit := true
@@ -271,20 +339,20 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	activeProfile := ""
 	switch method {
 	case 0:
-		e = r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+		e = r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
 	case 1:
-		e = r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, force)
+		e = r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, &options.force)
 	case 2:
 		if hasOPM {
-			e = r.setupImportOPM(p, &source, &autoCommit, force)
+			e = r.setupImportOPM(p, &source, &autoCommit, &options.force)
 		} else {
-			e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+			e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
 		}
 	case 3:
 		if !hasOPM {
 			return fmt.Errorf("invalid selection")
 		}
-		e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, force)
+		e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
 	default:
 		return fmt.Errorf("invalid selection")
 	}
@@ -301,7 +369,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	} else if selErr != nil && !strings.Contains(selErr.Error(), "EOF") {
 		return selErr
 	}
-	e = r.setupRun(p, source, sourceExplicit, repoVar, repoExplicit, autoCommit, *force, activeProfile)
+	e = r.setupRun(p, source, sourceExplicit, repoVar, repoExplicit, autoCommit, options.force, activeProfile)
 	if e != nil {
 		return e
 	}
@@ -552,8 +620,8 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 	return res, nil
 }
 func (r *Runner) apply(p ocp.Paths, args []string) error {
-	force := false
-	if e := parse("apply", args, func(f *flag.FlagSet) { f.BoolVar(&force, "force", false, "overwrite generated drift") }); e != nil {
+	var options forceOptions
+	if e := parse("apply", args, func(f *flag.FlagSet) { configureForce(f, &options, "overwrite generated drift") }); e != nil {
 		return e
 	}
 	rel, e := lock(p)
@@ -565,8 +633,8 @@ func (r *Runner) apply(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
-	res, e := r.install(p, s.Source, s.AutoCommit, false, force, false)
-	if d := new(ocp.DriftError); errors.As(e, &d) && !force {
+	res, e := r.install(p, s.Source, s.AutoCommit, false, options.force, false)
+	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "apply")
 	}
 	if res != nil {
@@ -595,8 +663,8 @@ func (r *Runner) confirmDrift(p ocp.Paths, s *ocp.State, d *ocp.DriftError, comm
 	return errors.New("cancelled")
 }
 func (r *Runner) sync(p ocp.Paths, args []string) error {
-	force := false
-	if e := parse("sync", args, func(f *flag.FlagSet) { f.BoolVar(&force, "force", false, "overwrite generated drift") }); e != nil {
+	var options forceOptions
+	if e := parse("sync", args, func(f *flag.FlagSet) { configureForce(f, &options, "overwrite generated drift") }); e != nil {
 		return e
 	}
 	rel, e := lock(p)
@@ -635,8 +703,8 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 		}
 		r.reportRepository(lockResult)
 	}
-	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: force, SkillProvider: provider})
-	if d := new(ocp.DriftError); errors.As(e, &d) && !force {
+	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: options.force, SkillProvider: provider})
+	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "sync")
 	}
 	if e != nil {
@@ -681,7 +749,7 @@ func (r *Runner) reportRepository(res repository.Result) {
 }
 func (r *Runner) use(p ocp.Paths, args []string) error {
 	if len(args) != 1 {
-		return errors.New("use requires exactly one profile")
+		return commandUsageError("use", errors.New("use requires exactly one profile"))
 	}
 	rel, e := lock(p)
 	if e != nil {
@@ -699,7 +767,7 @@ func (r *Runner) use(p ocp.Paths, args []string) error {
 }
 func (r *Runner) run(p ocp.Paths, args []string) error {
 	if len(args) < 1 {
-		return errors.New("run requires a profile")
+		return commandUsageError("run", errors.New("run requires a profile"))
 	}
 	if _, e := sourceState(p); e != nil {
 		return e
@@ -808,8 +876,8 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 	return nil
 }
 func (r *Runner) reset(p ocp.Paths, args []string) error {
-	force := false
-	if e := parse("reset", args, func(f *flag.FlagSet) { f.BoolVar(&force, "force", false, "replace user-owned OpenCode config") }); e != nil {
+	var options forceOptions
+	if e := parse("reset", args, func(f *flag.FlagSet) { configureForce(f, &options, "replace user-owned OpenCode config") }); e != nil {
 		return e
 	}
 	rel, e := lock(p)
@@ -817,8 +885,8 @@ func (r *Runner) reset(p ocp.Paths, args []string) error {
 		return e
 	}
 	defer rel()
-	source, e := ocp.Reset(p, force)
-	if e != nil && strings.Contains(e.Error(), "user-owned") && !force && r.tty() {
+	source, e := ocp.Reset(p, options.force)
+	if e != nil && strings.Contains(e.Error(), "user-owned") && !options.force && r.tty() {
 		fmt.Fprint(r.Out, "A user-owned OpenCode configuration will be replaced. Continue? [y/N] ")
 		if r.confirm() {
 			source, e = ocp.Reset(p, true)
@@ -972,9 +1040,9 @@ func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, f
 	return r.setupRun(p, *source, true, "", false, *autoCommit, true, "")
 }
 
-func selectedMarker(idx int, sel map[int]bool) string {
+func selectedMarker(idx int, sel map[int]bool, writer *color.Writer) string {
 	if sel[idx] {
-		return applyColor(color.ANSIGreen, "[x]")
+		return writer.Style(color.ANSIGreen, "[x]")
 	}
 	return "[ ]"
 }
@@ -989,7 +1057,7 @@ func (r *Runner) selectProfiles(profiles []string, title string) ([]string, erro
 		fmt.Fprintln(r.Out, title)
 		fmt.Fprintln(r.Out)
 		for i, p := range profiles {
-			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, selectedMarker(i, sel))
+			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, selectedMarker(i, sel, r.c))
 		}
 		fmt.Fprintln(r.Out)
 		fmt.Fprint(r.Out, "Toggle: [number] + Enter • Select all: [a] + Enter • Continue: Enter")
@@ -1100,23 +1168,16 @@ func (r *Runner) selectSingle(profiles []string, title string) (string, error) {
 	}
 }
 
-// applyColor wraps text with ANSI escape codes when colors are enabled.
-func applyColor(code, text string) string {
-	return color.ApplyColor(code, text)
-}
-
 func (r *Runner) importConfig(p ocp.Paths, args []string) error {
-	source := p.OCPSrc
-	force := false
 	f := flag.NewFlagSet("import", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
-	f.StringVar(&source, "source", source, "source directory")
-	f.BoolVar(&force, "force", false, "overwrite target files")
+	var options importOptions
+	configureImport(f, &options, p.OCPSrc)
 	if err := f.Parse(args); err != nil {
-		return err
+		return commandUsageError("import", err)
 	}
 	if f.NArg() > 1 {
-		return errors.New("import accepts at most one input path")
+		return commandUsageError("import", errors.New("import accepts at most one input path"))
 	}
 	input := p.OpenCode
 	if f.NArg() == 1 {
@@ -1127,12 +1188,12 @@ func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 		return e
 	}
 	defer rel()
-	if e := importer.Import(input, source, force); e != nil {
-		if !force && strings.Contains(e.Error(), "refusing to overwrite") && r.tty() {
+	if e := importer.Import(input, options.source, options.force); e != nil {
+		if !options.force && strings.Contains(e.Error(), "refusing to overwrite") && r.tty() {
 			fmt.Fprint(r.Out, "Existing source files will be overwritten. Continue? [y/N] ")
 			if r.confirm() {
-				if retry := importer.Import(input, source, true); retry == nil {
-					r.c.Success("Imported OpenCode configuration into " + source)
+				if retry := importer.Import(input, options.source, true); retry == nil {
+					r.c.Success("Imported OpenCode configuration into " + options.source)
 					return nil
 				} else {
 					return retry
@@ -1142,6 +1203,6 @@ func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 		}
 		return e
 	}
-	r.c.Success("Imported OpenCode configuration into " + source)
+	r.c.Success("Imported OpenCode configuration into " + options.source)
 	return nil
 }
