@@ -1040,9 +1040,9 @@ func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, f
 	return r.setupRun(p, *source, true, "", false, *autoCommit, true, "")
 }
 
-func selectedMarker(idx int, sel map[int]bool) string {
+func selectedMarker(idx int, sel map[int]bool, writer *color.Writer) string {
 	if sel[idx] {
-		return applyColor(color.ANSIGreen, "[x]")
+		return writer.Style(color.ANSIGreen, "[x]")
 	}
 	return "[ ]"
 }
@@ -1057,7 +1057,7 @@ func (r *Runner) selectProfiles(profiles []string, title string) ([]string, erro
 		fmt.Fprintln(r.Out, title)
 		fmt.Fprintln(r.Out)
 		for i, p := range profiles {
-			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, selectedMarker(i, sel))
+			fmt.Fprintf(r.Out, "  %d) %-25s%s\n", i+1, p, selectedMarker(i, sel, r.c))
 		}
 		fmt.Fprintln(r.Out)
 		fmt.Fprint(r.Out, "Toggle: [number] + Enter • Select all: [a] + Enter • Continue: Enter")
@@ -1166,11 +1166,6 @@ func (r *Runner) selectSingle(profiles []string, title string) (string, error) {
 		}
 		return profiles[n-1], nil
 	}
-}
-
-// applyColor wraps text with ANSI escape codes when colors are enabled.
-func applyColor(code, text string) string {
-	return color.ApplyColor(code, text)
 }
 
 func (r *Runner) importConfig(p ocp.Paths, args []string) error {

@@ -22,6 +22,11 @@ const (
 
 var colorDisabled atomic.Int32 // 0 = auto-detect, 1 = force disable
 
+var isTerminal = func(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
 // Disable disables all color output for the process.
 func Disable() { colorDisabled.Store(1) }
 
@@ -38,62 +43,63 @@ func New(out, err io.Writer) *Writer {
 	return &Writer{Out: out, Err: err}
 }
 
-func colorEnabled() bool {
-	return colorAllowed(term.IsTerminal(2))
-}
-
 func colorAllowed(terminal bool) bool {
 	return colorDisabled.Load() == 0 && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" && terminal
 }
 
-func applyColor(code, text string) string {
-	if !colorEnabled() {
+func applyColor(w io.Writer, code, text string) string {
+	if !colorAllowed(isTerminal(w)) {
 		return text
 	}
 	return code + text + ansiReset
 }
 
-// ApplyColor wraps text with ANSI escape codes when colors are enabled.
-func ApplyColor(code, text string) string { return applyColor(code, text) }
+// Style wraps text for the standard output writer when colors are enabled.
+func (c *Writer) Style(code, text string) string {
+	if c == nil {
+		return text
+	}
+	return applyColor(c.Out, code, text)
+}
 
 // Check writes a success indicator to Out.
 func (c *Writer) Check(msg string) {
-	fmt.Fprintf(c.Out, "%s %s\n", applyColor(ANSIGreen, "\u2713"), msg)
+	fmt.Fprintf(c.Out, "%s %s\n", applyColor(c.Out, ANSIGreen, "\u2713"), msg)
 }
 
 // CheckErr writes an error indicator to Err.
 func (c *Writer) CheckErr(msg string) {
-	fmt.Fprintf(c.Err, "%s %s\n", applyColor(ansiRed, "\u2717"), msg)
+	fmt.Fprintf(c.Err, "%s %s\n", applyColor(c.Err, ansiRed, "\u2717"), msg)
 }
 
 // CheckWarn writes a warning indicator to Err.
 func (c *Writer) CheckWarn(msg string) {
-	fmt.Fprintf(c.Err, "%s %s\n", applyColor(ansiYellow, "!"), msg)
+	fmt.Fprintf(c.Err, "%s %s\n", applyColor(c.Err, ansiYellow, "!"), msg)
 }
 
 // Success outputs a green success message.
 func (c *Writer) Success(msg string) {
-	fmt.Fprintln(c.Out, applyColor(ANSIGreen, "\u2713 "+msg))
+	fmt.Fprintln(c.Out, applyColor(c.Out, ANSIGreen, "\u2713 "+msg))
 }
 
 // Warning outputs a yellow warning message.
 func (c *Writer) Warning(msg string) {
-	fmt.Fprintln(c.Err, applyColor(ansiYellow, "Warning: "+msg))
+	fmt.Fprintln(c.Err, applyColor(c.Err, ansiYellow, "Warning: "+msg))
 }
 
 // Error outputs a red error message.
 func (c *Writer) Error(msg string) {
-	fmt.Fprintln(c.Err, applyColor(ansiRed, "Error: "+msg))
+	fmt.Fprintln(c.Err, applyColor(c.Err, ansiRed, "Error: "+msg))
 }
 
 // Muted outputs dimmed context text.
 func (c *Writer) Muted(msg string) {
-	fmt.Fprintln(c.Out, applyColor(ansiDim, msg))
+	fmt.Fprintln(c.Out, applyColor(c.Out, ansiDim, msg))
 }
 
 // Important outputs a magenta highlighted message.
 func (c *Writer) Important(msg string) {
-	fmt.Fprintln(c.Out, applyColor(ansiMagenta, msg))
+	fmt.Fprintln(c.Out, applyColor(c.Out, ansiMagenta, msg))
 }
 
 // Print outputs plain text with no formatting.
@@ -108,5 +114,5 @@ func (c *Writer) Printf(format string, args ...any) {
 
 // Prompt formats a menu selection line with a colored number prefix.
 func (c *Writer) Prompt(num int, label string) string {
-	return fmt.Sprintf("  %s) %s", applyColor(ANSIGreen, strconv.Itoa(num)), label)
+	return fmt.Sprintf("  %s) %s", applyColor(c.Out, ANSIGreen, strconv.Itoa(num)), label)
 }

@@ -2,6 +2,7 @@ package color
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
@@ -91,5 +92,24 @@ func TestColorAllowedHonorsConventions(t *testing.T) {
 	Disable()
 	if colorAllowed(true) {
 		t.Fatal("explicit disable should disable color")
+	}
+}
+
+func TestWriterChecksEachDestination(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	var out, errOut bytes.Buffer
+	oldTerminal := isTerminal
+	isTerminal = func(w io.Writer) bool { return w == &errOut }
+	t.Cleanup(func() { isTerminal = oldTerminal })
+
+	c := New(&out, &errOut)
+	c.Success("plain stdout")
+	c.Warning("colored stderr")
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("redirected stdout contains ANSI: %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "\x1b[") {
+		t.Fatalf("terminal stderr missing ANSI: %q", errOut.String())
 	}
 }
