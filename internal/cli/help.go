@@ -94,7 +94,7 @@ Documentation: https://github.com/nando/ocp
 }
 
 func (r *Runner) commandHelp(c *command) {
-	fmt.Fprintf(r.Out, "Usage: ocp %s\n\n%s\n", c.usage, c.description)
+	fmt.Fprintf(r.Out, "Usage: ocp %s\n\n%s\n\n%s\n", c.usage, c.summary, c.description)
 	if c.configure != nil {
 		f := flag.NewFlagSet(c.name, flag.ContinueOnError)
 		f.SetOutput(io.Discard)

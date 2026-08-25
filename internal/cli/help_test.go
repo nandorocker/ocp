@@ -48,7 +48,7 @@ func TestCommandHelpDoesNotResolvePaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := out.String()
-			for _, want := range []string{"Usage: ocp setup", "Set up OCP", "--no-auto-commit", "--force", "--migrate-profiles", "--repo", "--source", "Examples:"} {
+			for _, want := range []string{"Usage: ocp setup", "Initialize OCP from a local source or repository.", "Set up OCP", "--no-auto-commit", "--force", "--migrate-profiles", "--repo", "--source", "Examples:"} {
 				if !strings.Contains(got, want) {
 					t.Errorf("help missing %q:\n%s", want, got)
 				}
