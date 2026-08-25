@@ -4,6 +4,8 @@ package color
 import (
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"sync/atomic"
 
 	"golang.org/x/term"
@@ -23,6 +25,9 @@ var colorDisabled atomic.Int32 // 0 = auto-detect, 1 = force disable
 // Disable disables all color output for the process.
 func Disable() { colorDisabled.Store(1) }
 
+// Reset restores automatic color detection. It is primarily useful in tests.
+func Reset() { colorDisabled.Store(0) }
+
 // Writer holds the output writers used by OCP commands.
 type Writer struct {
 	Out, Err io.Writer
@@ -34,10 +39,11 @@ func New(out, err io.Writer) *Writer {
 }
 
 func colorEnabled() bool {
-	if colorDisabled.Load() == 1 {
-		return false
-	}
-	return term.IsTerminal(2) // stderr
+	return colorAllowed(term.IsTerminal(2))
+}
+
+func colorAllowed(terminal bool) bool {
+	return colorDisabled.Load() == 0 && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" && terminal
 }
 
 func applyColor(code, text string) string {
@@ -102,5 +108,5 @@ func (c *Writer) Printf(format string, args ...any) {
 
 // Prompt formats a menu selection line with a colored number prefix.
 func (c *Writer) Prompt(num int, label string) string {
-	return fmt.Sprintf("  \033[32m%d\033[0m) %s", num, label)
+	return fmt.Sprintf("  %s) %s", applyColor(ANSIGreen, strconv.Itoa(num)), label)
 }

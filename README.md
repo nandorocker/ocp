@@ -93,6 +93,8 @@ opencode
 
 ## Commands
 
+Run `ocp` or `ocp --help` for the command overview. Use `ocp help <command>` or `ocp <command> --help` for command options and examples.
+
 ```text
 ocp setup
 ocp sync
@@ -101,10 +103,13 @@ ocp use <profile>
 ocp run <profile> [args...]
 ocp list
 ocp status
+ocp version
 ocp import [path]
 ocp upgrade [skill <name>]
 ocp reset
 ```
+
+`ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
 
 `upgrade` is intentionally deferred in the current MVP implementation. Git-backed skills are initialized during setup or sync and reproduced from `ocp.lock`.
 

@@ -8,7 +8,7 @@ import (
 
 func TestColorDisabled(t *testing.T) {
 	Disable()
-	defer Disable() // restore after test
+	t.Cleanup(Reset)
 
 	var out bytes.Buffer
 	c := New(&out, &out)
@@ -17,11 +17,14 @@ func TestColorDisabled(t *testing.T) {
 	c.Success("msg")
 	c.Muted("dim")
 	c.Important("imp")
-	c.Prompt(1, "label")
+	prompt := c.Prompt(1, "label")
 
 	buf := out.String()
 	if strings.Contains(buf, "\x1b[") {
 		t.Fatal("expected no ANSI codes when disabled")
+	}
+	if strings.Contains(prompt, "\x1b[") {
+		t.Fatal("expected no ANSI codes in prompt when disabled")
 	}
 	if !strings.Contains(buf, "test") || !strings.Contains(buf, "✓") {
 		t.Fatalf("expected plain text markers in output: %q", buf)
@@ -67,7 +70,26 @@ func TestPromptFormat(t *testing.T) {
 	if !strings.Contains(p, "1") || !strings.Contains(p, "First option") {
 		t.Fatalf("prompt format wrong: %q", p)
 	}
-	if !strings.Contains(p, "\x1b[32m") {
-		t.Fatalf("prompt missing green number: %q", p)
+}
+
+func TestColorAllowedHonorsConventions(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	if !colorAllowed(true) {
+		t.Fatal("terminal should allow color by default")
+	}
+	t.Setenv("NO_COLOR", "1")
+	if colorAllowed(true) {
+		t.Fatal("NO_COLOR should disable color")
+	}
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "dumb")
+	if colorAllowed(true) {
+		t.Fatal("TERM=dumb should disable color")
+	}
+	t.Setenv("TERM", "xterm")
+	Disable()
+	if colorAllowed(true) {
+		t.Fatal("explicit disable should disable color")
 	}
 }

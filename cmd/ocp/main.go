@@ -20,5 +20,9 @@ func main() {
 		os.Exit(exit.Code)
 	}
 	fmt.Fprintln(os.Stderr, "ocp:", err)
+	var usage *cli.UsageError
+	if errors.As(err, &usage) {
+		os.Exit(2)
+	}
 	os.Exit(1)
 }

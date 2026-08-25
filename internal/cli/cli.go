@@ -28,6 +28,36 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("child exited with status %d", e.Code) }
 
+// UsageError reports invalid command-line syntax with the conventional exit code 2.
+type UsageError struct {
+	Err     error
+	Command string
+}
+
+func (e *UsageError) Error() string {
+	help := "ocp --help"
+	if e.Command != "" {
+		help = "ocp help " + e.Command
+	}
+	return fmt.Sprintf("%s\nRun '%s' for usage.", e.Err, help)
+}
+func (e *UsageError) Unwrap() error { return e.Err }
+
+func usageError(err error) error {
+	return commandUsageError("", err)
+}
+
+func commandUsageError(command string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var usage *UsageError
+	if errors.As(err, &usage) {
+		return err
+	}
+	return &UsageError{Err: err, Command: command}
+}
+
 type installResult struct {
 	Source   string
 	Profiles []string
@@ -85,6 +115,20 @@ func (r *Runner) defaults() {
 // Run dispatches a single OCP invocation.
 func (r *Runner) Run(args []string) error {
 	r.defaults()
+	for len(args) > 0 && args[0] == "--no-color" {
+		color.Disable()
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		r.help()
+		return nil
+	}
+	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if c := commandByName(args[0]); c != nil {
+			r.commandHelp(c)
+			return nil
+		}
+	}
 	if len(args) > 0 && (args[0] == "--version" || args[0] == "version") {
 		if err := parse("version", args[1:], func(*flag.FlagSet) {}); err != nil {
 			return err
@@ -92,27 +136,29 @@ func (r *Runner) Run(args []string) error {
 		fmt.Fprintf(r.Out, "ocp %s\n", r.Version)
 		return nil
 	}
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" && len(args) == 1 {
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" && len(args) == 1 {
+		if len(args) != 1 {
+			return usageError(errors.New("help does not accept extra arguments"))
+		}
 		r.help()
 		return nil
 	}
 	if args[0] == "help" {
 		if len(args) != 2 {
-			return errors.New("help accepts exactly one command")
+			return usageError(errors.New("help accepts exactly one command"))
 		}
 		c := commandByName(args[1])
 		if c == nil {
-			return fmt.Errorf("unknown command %q", args[1])
+			return unknownCommand(args[1])
 		}
 		r.commandHelp(c)
 		return nil
 	}
-	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
-		c := commandByName(args[0])
-		if c != nil {
-			r.commandHelp(c)
-			return nil
-		}
+	if strings.HasPrefix(args[0], "-") {
+		return usageError(fmt.Errorf("unknown global option %q", args[0]))
+	}
+	if commandByName(args[0]) == nil {
+		return unknownCommand(args[0])
 	}
 	p, err := r.Paths()
 	if err != nil {
@@ -140,19 +186,18 @@ func (r *Runner) Run(args []string) error {
 	case "upgrade":
 		fmt.Fprintln(r.Err, "upgrade is deferred and not implemented in this MVP")
 		return &ExitError{Code: 2}
-	default:
-		return fmt.Errorf("unknown command %q (run 'ocp --help')", args[0])
 	}
+	return nil
 }
 func parse(name string, args []string, configure func(*flag.FlagSet)) error {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	configure(f)
 	if err := f.Parse(args); err != nil {
-		return err
+		return commandUsageError(name, err)
 	}
 	if f.NArg() != 0 {
-		return fmt.Errorf("%s: unexpected arguments: %s", name, strings.Join(f.Args(), " "))
+		return commandUsageError(name, fmt.Errorf("%s: unexpected arguments: %s", name, strings.Join(f.Args(), " ")))
 	}
 	return nil
 }
@@ -213,10 +258,10 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	var options setupOptions
 	configureSetup(autoFlag, &options)
 	if err := autoFlag.Parse(args); err != nil {
-		return err
+		return commandUsageError("setup", err)
 	}
 	if autoFlag.NArg() != 0 {
-		return fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " "))
+		return commandUsageError("setup", fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " ")))
 	}
 	state, err := ocp.LoadState(p)
 	if err != nil {
@@ -704,7 +749,7 @@ func (r *Runner) reportRepository(res repository.Result) {
 }
 func (r *Runner) use(p ocp.Paths, args []string) error {
 	if len(args) != 1 {
-		return errors.New("use requires exactly one profile")
+		return commandUsageError("use", errors.New("use requires exactly one profile"))
 	}
 	rel, e := lock(p)
 	if e != nil {
@@ -722,7 +767,7 @@ func (r *Runner) use(p ocp.Paths, args []string) error {
 }
 func (r *Runner) run(p ocp.Paths, args []string) error {
 	if len(args) < 1 {
-		return errors.New("run requires a profile")
+		return commandUsageError("run", errors.New("run requires a profile"))
 	}
 	if _, e := sourceState(p); e != nil {
 		return e
@@ -1134,10 +1179,10 @@ func (r *Runner) importConfig(p ocp.Paths, args []string) error {
 	var options importOptions
 	configureImport(f, &options, p.OCPSrc)
 	if err := f.Parse(args); err != nil {
-		return err
+		return commandUsageError("import", err)
 	}
 	if f.NArg() > 1 {
-		return errors.New("import accepts at most one input path")
+		return commandUsageError("import", errors.New("import accepts at most one input path"))
 	}
 	input := p.OpenCode
 	if f.NArg() == 1 {

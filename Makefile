@@ -1,7 +1,10 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 TARGET ?= ocp
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS ?=
+
+export VERSION
 
 .PHONY: install uninstall clean
 
@@ -19,8 +22,7 @@ uninstall:
 	rm -f "$(BINDIR)/$(TARGET)"
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o "$(TARGET)" ./cmd/ocp
+	go build -ldflags "$(LDFLAGS) -X main.version=$$VERSION" -o "$(TARGET)" ./cmd/ocp
 
 clean:
-	rm -f "$(TARGET)"
-	GOOS=darwin GOARCH=arm64 go build -o "$(TARGET)-darwin-arm64" ./cmd/ocp 2>/dev/null || true
+	rm -f "$(TARGET)" "$(TARGET)-darwin-arm64"

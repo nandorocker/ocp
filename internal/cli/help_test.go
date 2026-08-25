@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/nando/ocp/internal/color"
 	"github.com/nando/ocp/internal/ocp"
 )
 
@@ -28,15 +30,69 @@ func TestGlobalHelpDoesNotResolvePaths(t *testing.T) {
 			}
 			got := out.String()
 			for _, want := range []string{
-				"OCP", "Usage: ocp [global options] <command> [arguments]", "Getting Started", "ocp setup",
+				"OCP manages reproducible OpenCode profiles.", "Usage: ocp [global options] <command> [arguments]", "Getting Started", "ocp setup",
 				"Commands:", "setup", "sync", "apply", "use", "run", "list", "status", "import", "upgrade", "reset",
-				"Global Options:", "--help", "--version", "--no-color", "https://github.com/nando/ocp",
+				"Global Options:", "--help", "--version", "--no-color", "https://github.com/nandorocker/ocp",
 			} {
 				if !strings.Contains(got, want) {
 					t.Errorf("help missing %q:\n%s", want, got)
 				}
 			}
 		})
+	}
+}
+
+func TestUsageErrorsAndSuggestion(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "unknown", args: []string{"stats"}, want: `Did you mean "status"?`},
+		{name: "unknown option", args: []string{"--wat"}, want: "unknown global option"},
+		{name: "missing use profile", args: []string{"use"}, want: "use requires exactly one profile"},
+		{name: "missing run profile", args: []string{"run"}, want: "run requires a profile"},
+		{name: "unexpected list argument", args: []string{"list", "extra"}, want: "list: unexpected arguments"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			r := runner(testPaths(t), &out)
+			err := r.Run(test.args)
+			var usage *UsageError
+			if !errors.As(err, &usage) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want UsageError containing %q", err, test.want)
+			}
+			if test.args[0] == "use" && !strings.Contains(err.Error(), "ocp help use") {
+				t.Fatalf("error missing command usage hint: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeErrorIsNotUsageError(t *testing.T) {
+	var out bytes.Buffer
+	err := runner(testPaths(t), &out).Run([]string{"status"})
+	var usage *UsageError
+	if err == nil || errors.As(err, &usage) {
+		t.Fatalf("error = %v, want runtime error", err)
+	}
+}
+
+func TestGlobalNoColor(t *testing.T) {
+	color.Reset()
+	t.Cleanup(color.Reset)
+	var out bytes.Buffer
+	if err := helpRunner(&out).Run([]string{"--no-color", "--help"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Usage:") {
+		t.Fatalf("help = %q", out.String())
+	}
+	out.Reset()
+	err := runner(testPaths(t), &out).Run([]string{"--no-color", "status"})
+	if err == nil || !strings.Contains(err.Error(), "not set up") {
+		t.Fatalf("--no-color was not consumed as a global option: %v", err)
 	}
 }
 
