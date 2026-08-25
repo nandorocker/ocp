@@ -48,7 +48,7 @@ func commands() []command {
 		{"sync", "sync [options]", "Synchronize configuration and apply profiles.", "Sync the configured source repository and render profiles.", []string{"ocp sync", "ocp sync --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "overwrite generated drift") }},
 		{"apply", "apply [options]", "Render the current configuration.", "Apply the configured source without synchronizing it.", []string{"ocp apply", "ocp apply --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "overwrite generated drift") }},
 		{"use", "use <profile>", "Activate a rendered profile.", "Set the active OpenCode profile.", []string{"ocp use default"}, nil},
-		{"run", "run <profile> [arguments]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
+		{"run", "run <profile> [opencode arguments...]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
 		{"list", "list", "List rendered profiles.", "List rendered profiles and mark the active profile.", []string{"ocp list"}, nil},
 		{"status", "status", "Show OCP status.", "Show the configured source and active profile.", []string{"ocp status"}, nil},
 		{"import", "import [options] [path]", "Import an OpenCode configuration.", "Import an OpenCode configuration into an OCP source.", []string{"ocp import ~/.config/opencode", "ocp import --source ./ocp-config"}, func(f *flag.FlagSet) { configureImport(f, &importOptions{}, "") }},

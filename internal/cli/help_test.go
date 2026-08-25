@@ -57,12 +57,20 @@ func TestCommandHelpDoesNotResolvePaths(t *testing.T) {
 	}
 }
 
+func TestHelpRejectsExtraArguments(t *testing.T) {
+	var out bytes.Buffer
+	err := helpRunner(&out).Run([]string{"help", "setup", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "help accepts exactly one command") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRunHelpDoesNotResolvePaths(t *testing.T) {
 	var out bytes.Buffer
 	if err := helpRunner(&out).Run([]string{"run", "--help"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "Usage: ocp run <profile> [arguments]") {
+	if !strings.Contains(out.String(), "Usage: ocp run <profile> [opencode arguments...]") {
 		t.Fatalf("help = %q", out.String())
 	}
 }

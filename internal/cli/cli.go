@@ -86,6 +86,9 @@ func (r *Runner) Run(args []string) error {
 		return nil
 	}
 	if args[0] == "help" {
+		if len(args) != 2 {
+			return errors.New("help accepts exactly one command")
+		}
 		c := commandByName(args[1])
 		if c == nil {
 			return fmt.Errorf("unknown command %q", args[1])
