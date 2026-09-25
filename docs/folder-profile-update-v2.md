@@ -342,27 +342,27 @@ openai     → Model D
 
 No agent duplication is required.
 
-### 10.2 Hard-coded agent model
+### 10.2 Agent source model
 
 OpenCode agent Markdown may itself contain a model.
 
 OCP should allow this.
 
-A model defined directly in the agent source file is treated as an intentional hard constraint.
+A model defined directly in the agent source file is the reusable agent's default.
 
-It overrides profile-level model assignment for that agent.
+An explicit profile-level model assignment overrides it in that profile's generated agent copy without changing the shared source.
 
 Conceptual precedence:
 
 ```text
-profile model assignment
-        ↓
 agent Markdown model, if present
+        ↓
+profile agent model assignment, if present
         ↓
 final rendered model
 ```
 
-If the agent source contains no model, the profile assignment is used.
+If neither the agent source nor the profile assignment contains a model, the profile model applies.
 
 ### 10.3 Best practice
 
@@ -409,19 +409,17 @@ If `implementer.md` itself specifies:
 model: anthropic/fixed-model
 ```
 
-then the resolved agent uses:
+then the source model remains the default, but this profile's explicit assignment still wins:
 
 ```text
-anthropic/fixed-model
+openai/coding-model
 ```
 
-regardless of the profile assignment.
-
-OCP may surface this clearly in status/debug output if useful:
+OCP may surface the source default and active override clearly in status/debug output if useful:
 
 ```text
-implementer: anthropic/fixed-model
-  model fixed by agent source
+implementer: openai/coding-model
+  overrides source default anthropic/fixed-model
 ```
 
 Do not add interactive conflict resolution for this in MVP.
@@ -531,7 +529,7 @@ agents:
     model: model-b
 ```
 
-`deep` uses `model-b`, unless the underlying agent Markdown fixes its own model.
+`deep` uses `model-b`, including when the underlying agent Markdown supplies a different default model.
 
 ---
 
@@ -561,7 +559,7 @@ Skills/plugins:
 additive + deduplicated by logical identity
 ```
 
-Agent source-level model declarations remain authoritative over profile model assignments.
+Agent source-level model declarations are defaults that explicit profile agent assignments may override.
 
 ---
 
@@ -679,7 +677,7 @@ When rendering `deep`, OCP should:
 4. merge root, parent and profile configuration
 5. resolve referenced agents
 6. assign profile-level agent models
-7. preserve any agent-source model that explicitly overrides profile assignment
+7. apply any profile assignment override to the generated agent copy
 8. resolve skills and plugins
 9. render the resulting OpenCode environment
 
@@ -824,7 +822,7 @@ Required:
 * profile-level model assignment
 * model-agnostic agents as the recommended pattern
 * support for explicit model declarations inside agent Markdown
-* agent-source model overriding profile assignment
+* profile assignment overriding an agent-source model default
 * shared agent reuse across profiles
 * existing skills/plugins behavior
 * OpenCode-native rendering
@@ -874,7 +872,7 @@ This change succeeds if:
 6. each profile can assign a different model to `implementer`
 7. changing an agent's prompt changes its behavior everywhere it is reused
 8. changing a profile model does not require editing the agent Markdown
-9. an intentionally hard-coded agent model remains authoritative
+9. an agent source model remains the default unless a profile explicitly overrides it
 10. rendered output remains OpenCode-native
 11. single-profile users retain a minimal setup
 

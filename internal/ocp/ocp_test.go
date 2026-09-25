@@ -164,7 +164,7 @@ agents:
 	}
 }
 
-func TestRenderAgentFrontmatterModelOverridesProfileModel(t *testing.T) {
+func TestRenderAgentAssignmentModelOverridesFrontmatterInGeneratedCopy(t *testing.T) {
 	p := testPaths(t)
 	src := source(t, "version: 1\nagents:\n  helper:\n    file: agents/helper.md\n    model: profile/model\n    config:\n      mode: subagent\n")
 	path := filepath.Join(src, "agents", "helper.md")
@@ -189,8 +189,50 @@ func TestRenderAgentFrontmatterModelOverridesProfileModel(t *testing.T) {
 	if _, exists := helper["model"]; exists {
 		t.Fatalf("frontmatter model competed with native config: %#v", helper)
 	}
-	if got, err := os.ReadFile(filepath.Join(root, "agents", "helper.md")); err != nil || string(got) != markdown {
+	if got, err := os.ReadFile(filepath.Join(root, "agents", "helper.md")); err != nil || !strings.Contains(string(got), "model: profile/model") || !strings.Contains(string(got), "description: helper") || !strings.Contains(string(got), "Help.") {
 		t.Fatalf("agent Markdown = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != markdown {
+		t.Fatalf("canonical agent Markdown = %q, %v", got, err)
+	}
+}
+
+func TestRenderAgentModelPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, agent, markdown, want string
+	}{
+		{"source over profile", "file: agents/helper.md\n", "---\nmodel: source/model\n---\nbody\n", "source/model"},
+		{"assignment without source", "file: agents/helper.md\n    model: assignment/model\n", "body\n", "assignment/model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := testPaths(t)
+			src := source(t, "version: 1\nconfig:\n  model: profile/model\nagents:\n  helper:\n    "+tc.agent)
+			path := filepath.Join(src, "agents", "helper.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.markdown), 0600); err != nil {
+				t.Fatal(err)
+			}
+			render(t, p, src, false)
+			b, err := os.ReadFile(filepath.Join(p.Current, "default", "opencode.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var native map[string]any
+			if err := json.Unmarshal(b, &native); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "source over profile" {
+				if _, exists := native["agent"]; exists {
+					t.Fatalf("source model competed with JSON: %#v", native)
+				}
+				return
+			}
+			if got := native["agent"].(map[string]any)["helper"].(map[string]any)["model"]; got != tc.want {
+				t.Fatalf("model = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -238,6 +238,7 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 	agentSources := make(map[string][]byte, len(p.Agents))
 	for name, a := range p.Agents {
 		var sourceModel bool
+		assignmentModel := modelFromConfig(a.Config)
 		if a.File != "" {
 			b, err := readSource(source, a.File, false)
 			if err != nil {
@@ -246,6 +247,13 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 			agentSources[name] = b
 			if _, sourceModel, err = agentFrontmatterModel(b); err != nil {
 				return nil, fmt.Errorf("agent %q: %w", name, err)
+			}
+			if sourceModel && assignmentModel != "" {
+				b, err = patchAgentFrontmatterModel(b, assignmentModel)
+				if err != nil {
+					return nil, fmt.Errorf("agent %q: %w", name, err)
+				}
+				agentSources[name] = b
 			}
 		}
 
@@ -347,6 +355,11 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 	return warnings, writeManifest(dest)
 }
 
+func modelFromConfig(values map[string]any) string {
+	model, _ := values["model"].(string)
+	return model
+}
+
 func pluginList(v any) ([]string, error) {
 	if v == nil {
 		return nil, nil
@@ -431,6 +444,58 @@ func agentFrontmatterModel(data []byte) (string, bool, error) {
 		return "", false, errors.New("frontmatter model must be a non-empty string")
 	}
 	return model, true, nil
+}
+
+// AgentSourceModel reads a source agent using the renderer's path-safety rules.
+func AgentSourceModel(source, name string) (string, bool, error) {
+	b, err := readSource(source, name, false)
+	if err != nil {
+		return "", false, err
+	}
+	return agentFrontmatterModel(b)
+}
+
+// patchAgentFrontmatterModel changes only a generated agent copy. yaml.v3
+// preserves mapping comments and unrelated fields while retaining the Markdown body.
+func patchAgentFrontmatterModel(data []byte, model string) ([]byte, error) {
+	lines := bytes.Split(data, []byte("\n"))
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if string(bytes.TrimSuffix(lines[i], []byte("\r"))) == "---" {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil, errors.New("unterminated YAML frontmatter")
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(bytes.Join(lines[1:end], []byte("\n")), &document); err != nil {
+		return nil, fmt.Errorf("invalid YAML frontmatter: %w", err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("frontmatter must be a mapping")
+	}
+	mapping := document.Content[0]
+	found := false
+	for i := 0; i < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == "model" {
+			mapping.Content[i+1].Kind = yaml.ScalarNode
+			mapping.Content[i+1].Tag = "!!str"
+			mapping.Content[i+1].Value = model
+			found = true
+			break
+		}
+	}
+	if !found {
+		mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "model"}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: model})
+	}
+	frontmatter, err := yaml.Marshal(&document)
+	if err != nil {
+		return nil, err
+	}
+	body := bytes.Join(lines[end+1:], []byte("\n"))
+	return append(append(append([]byte("---\n"), frontmatter...), []byte("---\n")...), body...), nil
 }
 
 func readSource(root, name string, dir bool) ([]byte, error) {

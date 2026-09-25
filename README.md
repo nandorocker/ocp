@@ -61,7 +61,7 @@ agents:
     model: openai/example-coding-model
 ```
 
-`agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in the referenced agent Markdown frontmatter remains authoritative.
+`agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 
 Then initialize and switch profiles:
 
