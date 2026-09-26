@@ -365,9 +365,9 @@ func profiles(node *yaml.Node) (map[string]ProfileSpec, error) {
 	return out, nil
 }
 
-// ResolveFromDir resolves profiles using file-based profile discovery when
-// doc.SourceDir is set and the profiles directory exists.  Otherwise it falls
-// back to inline profiles already parsed from ocp.yaml.
+// ResolveFromDir resolves profiles from YAML files or profile directories when
+// the profiles directory contains them. Otherwise it falls back to inline
+// profiles already parsed from ocp.yaml.
 func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 	doc.SourceDir = sourceDir
 
@@ -376,7 +376,7 @@ func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 	if err == nil {
 		var hasFileProfiles bool
 		for _, e := range entries {
-			if !e.IsDir() && (strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml")) {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml") {
 				hasFileProfiles = true
 				break
 			}
@@ -411,41 +411,56 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 	result := make(map[string]ProfileSpec)
 	profileFiles := make(map[string]string)
 	for _, e := range entries {
-		name := e.Name()
-		ext := filepath.Ext(name)
-		if ext != ".yaml" && ext != ".yml" {
-			continue
-		}
+		entryName := e.Name()
+		base, filePath, guidePath := "", "", ""
+		displayName := entryName
 		if e.Type()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("profile file %q must be a regular file", name)
+			if strings.HasSuffix(entryName, ".yaml") || strings.HasSuffix(entryName, ".yml") {
+				return nil, fmt.Errorf("profile file %q must be a regular file", entryName)
+			}
+			return nil, fmt.Errorf("profile entry %q must not be a symlink", entryName)
 		}
-		info, err := e.Info()
+		if e.IsDir() {
+			base = entryName
+			if err := validName("profile directory", base); err != nil {
+				return nil, err
+			}
+			filePath = filepath.Join(profilesDir, entryName, "profile.yaml")
+			displayName = filePath
+			guidePath = filepath.Join("profiles", entryName, "guide.md")
+		} else {
+			ext := filepath.Ext(entryName)
+			if ext != ".yaml" && ext != ".yml" {
+				continue
+			}
+			base = strings.TrimSuffix(entryName, ext)
+			if err := validName("profile file", base); err != nil {
+				return nil, err
+			}
+			filePath = filepath.Join(profilesDir, entryName)
+		}
+		info, err := os.Lstat(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("inspect profile file %q: %w", name, err)
+			return nil, fmt.Errorf("inspect profile file %q: %w", displayName, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("profile file %q must be a regular file", name)
-		}
-		base := strings.TrimSuffix(name, ext)
-		if err := validName("profile file", base); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("profile file %q must be a regular file", displayName)
 		}
 		if previous, exists := profileFiles[base]; exists {
-			return nil, fmt.Errorf("duplicate profile %q from %q and %q", base, previous, name)
+			return nil, fmt.Errorf("duplicate profile %q from %q and %q", base, previous, entryName)
 		}
 
-		filePath := filepath.Join(profilesDir, name)
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			return nil, fmt.Errorf("read profile file %q: %w", name, err)
+			return nil, fmt.Errorf("read profile file %q: %w", displayName, err)
 		}
 
 		var node yaml.Node
 		if err := yaml.Unmarshal(data, &node); err != nil {
-			return nil, fmt.Errorf("parse profile file %q: %w", name, err)
+			return nil, fmt.Errorf("parse profile file %q: %w", displayName, err)
 		}
 		if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
-			return nil, fmt.Errorf("profile file %q must be a YAML mapping", name)
+			return nil, fmt.Errorf("profile file %q must be a YAML mapping", displayName)
 		}
 
 		values, err := mapping(node.Content[0], "profile file "+base, "extends", "config", "instructions", "skills", "plugins", "agents")
@@ -471,6 +486,13 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 		if spec.Instructions, err = stringsList(values["instructions"], "profile "+base+" instructions"); err != nil {
 			return nil, err
 		}
+		if guidePath != "" {
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(filePath), "guide.md")); err == nil {
+				spec.Instructions = append([]string{guidePath}, spec.Instructions...)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("inspect profile guide %q: %w", guidePath, err)
+			}
+		}
 		if spec.Skills, err = skills(values["skills"]); err != nil {
 			return nil, err
 		}
@@ -481,7 +503,7 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 			return nil, err
 		}
 		result[base] = spec
-		profileFiles[base] = name
+		profileFiles[base] = entryName
 	}
 	return result, nil
 }

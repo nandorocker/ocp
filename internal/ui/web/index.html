@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="ocp-token" content="__OCP_TOKEN__">
+  <title>OCP</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app" class="shell" aria-busy="true">
+    <header class="topbar">
+      <button class="mobile-nav" id="mobile-nav" aria-label="Toggle navigation">OCP</button>
+      <div class="brand"><span class="brand-mark">OCP</span><span class="brand-copy">OpenCode Profiles</span></div>
+      <div class="top-actions">
+        <span id="status" class="status">Loading configuration</span>
+        <button id="apply" class="button secondary">Apply all</button>
+      </div>
+    </header>
+    <aside class="sidebar" id="sidebar">
+      <button id="agents-nav" class="side-link"><span>Agents</span><span id="agent-count" class="count"></span></button>
+      <div class="side-rule"></div>
+      <div class="side-heading"><span>Profiles</span><button id="new-profile" class="icon-button" title="New profile">+</button></div>
+      <nav id="profile-list" class="profile-list" aria-label="Profiles"></nav>
+      <div class="side-footer">Local configuration editor</div>
+    </aside>
+    <main id="workspace" class="workspace"><div class="loading">Reading OCP source...</div></main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog"><form method="dialog" id="dialog-form"></form></dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

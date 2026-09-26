@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nando/ocp/internal/ocp"
+	"github.com/nando/ocp/internal/ui"
 )
 
 func testPaths(t *testing.T) ocp.Paths {
@@ -118,6 +119,35 @@ func TestApplyRefusesDriftWithoutForce(t *testing.T) {
 	}
 	if err := r.Run([]string{"apply", "--force"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUICommandOptions(t *testing.T) {
+	p := testPaths(t)
+	source := filepath.Join(t.TempDir(), "source")
+	write(t, filepath.Join(source, "ocp.yaml"), "version: 1\n")
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ocp.SaveState(p, ocp.State{Source: abs, AutoCommit: true}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	r := runner(p, &out)
+	var options ui.Options
+	r.RunUI = func(got ui.Options) error {
+		options = got
+		return nil
+	}
+	if err := r.Run([]string{"ui", "--no-open", "--trusted-origin", "https://windy.tail1fe933.ts.net:4100"}); err != nil {
+		t.Fatal(err)
+	}
+	if options.Open || options.Source != abs || options.Apply == nil || options.TrustedOrigin != "https://windy.tail1fe933.ts.net:4100" {
+		t.Fatalf("ui options = %#v", options)
+	}
+	if err := r.Run([]string{"ui", "extra"}); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Fatalf("ui extra argument error = %v", err)
 	}
 }
 
