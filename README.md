@@ -63,6 +63,8 @@ agents:
 
 An optional `profiles/deep/guide.md` is included in that profile's generated `AGENTS.md`. Paths in profile YAML remain relative to the OCP source root.
 
+Local skills can live directly under `skills/` or in any subfolder, such as `skills/apple/`. Each profile explicitly lists the skill paths it uses; folder names do not enable skills automatically.
+
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 
 Then initialize and switch profiles:
