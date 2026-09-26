@@ -44,15 +44,15 @@ config:
   model: openrouter/example-model
 ```
 
-For multiple profiles, add one `.yaml` or `.yml` file per profile. The filename is the profile name:
+For multiple profiles, use one YAML file per profile. Flat files remain supported, and profiles can also have a folder with `profile.yaml` and an optional `guide.md`:
 
 ```yaml
-# profiles/default.yaml
+# profiles/default/profile.yaml
 {}
 ```
 
 ```yaml
-# profiles/deep.yaml
+# profiles/deep/profile.yaml
 extends: default
 config:
   model: openrouter/example-reasoning-model
@@ -60,6 +60,8 @@ agents:
   implementer:
     model: openai/example-coding-model
 ```
+
+An optional `profiles/deep/guide.md` is included in that profile's generated `AGENTS.md`. Paths in profile YAML remain relative to the OCP source root.
 
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 
@@ -103,6 +105,7 @@ ocp use <profile>
 ocp run <profile> [args...]
 ocp list
 ocp status
+ocp ui [--no-open]
 ocp version
 ocp import [path]
 ocp upgrade [skill <name>]
@@ -110,6 +113,8 @@ ocp reset
 ```
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
+
+The UI binds only to loopback. To use it through a trusted reverse proxy, opt in to one exact browser-facing origin with `ocp ui --trusted-origin https://host.example:4100`. OCP does not trust forwarded host or scheme headers.
 
 `upgrade` is intentionally deferred in the current MVP implementation. Git-backed skills are initialized during setup or sync and reproduced from `ocp.lock`.
 

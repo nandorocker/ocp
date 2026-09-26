@@ -52,6 +52,10 @@ func commands() []command {
 		{"run", "run <profile> [opencode arguments...]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
 		{"list", "list", "List rendered profiles.", "List rendered profiles and mark the active profile.", []string{"ocp list"}, nil},
 		{"status", "status", "Show OCP status.", "Show the configured source and active profile.", []string{"ocp status"}, nil},
+		{"ui", "ui [options]", "Manage profiles in a local web interface.", "Start the local OCP profile and agent editor.", []string{"ocp ui", "ocp ui --no-open", "ocp ui --trusted-origin https://host.example:4100"}, func(f *flag.FlagSet) {
+			f.Bool("no-open", false, "do not open the default browser")
+			f.String("trusted-origin", "", "exact HTTPS origin trusted to access the UI")
+		}},
 		{"version", "version", "Show the OCP version.", "Print the version embedded when OCP was built.", []string{"ocp version", "ocp --version"}, nil},
 		{"import", "import [options] [path]", "Import an OpenCode configuration.", "Import an OpenCode configuration into an OCP source.", []string{"ocp import ~/.config/opencode", "ocp import --source ./ocp-config"}, func(f *flag.FlagSet) { configureImport(f, &importOptions{}, "") }},
 		{"upgrade", "upgrade [arguments]", "Upgrade OCP components.", "Upgrade is deferred and not implemented in this MVP.", []string{"ocp upgrade"}, nil},
