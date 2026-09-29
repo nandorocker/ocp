@@ -61,11 +61,32 @@ agents:
     model: openai/example-coding-model
 ```
 
-An optional `profiles/deep/guide.md` is included in that profile's generated `AGENTS.md`. Paths in profile YAML remain relative to the OCP source root.
+An optional `profiles/deep/guide.md` is included in that profile's generated `AGENTS.md`. Agent and instruction paths in profile YAML are relative to the OCP source root; skill and plugin references use their own standard folders.
 
-Local skills can live directly under `skills/` or in any subfolder, such as `skills/apple/`. Each profile explicitly lists the skill paths it uses; folder names do not enable skills automatically.
+During `ocp setup`, OCP asks for this machine's name (defaulting to the hostname, overridable with `--machine`). The name is stored in local state and drives machine-aware rendering:
+
+```yaml
+# profiles/hybrid/profile.yaml — shared base plus per-machine overlays
+config:
+  model: openai/gpt-6-sol
+skills:
+  - stop-slop
+machines:
+  windy:
+    config:
+      provider:
+        ollama:
+          options:
+            baseURL: http://127.0.0.1:11434/v1
+```
+
+A profile with `hosts: [windy]` renders only on Windy; without `hosts` it renders everywhere. When the machine is named `windy`, OCP automatically appends `hosts/windy.md` to that profile's `AGENTS.md` — no declaration needed.
+
+Local skills live under `skills/` (including nested folders such as `skills/apple/`). List paths relative to that folder: `skills: [stop-slop, apple/swiftlint]`. Each profile explicitly lists the skills it uses; folder names do not enable skills automatically. Existing `./skills/...` declarations remain supported. Git-backed skills still use explicit Git URLs.
 
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
+
+Local plugin files live under `plugins/`. List `.ts`/`.js` filenames relative to that folder in `plugins` or `config.plugin`, for example `harness-bridge.ts`. Existing `./plugins/...` declarations remain supported. OCP validates local files and renders `file://` URLs using this machine's source path; npm package declarations pass through unchanged. Local skills and plugins outside their standard folders are rejected.
 
 Then initialize and switch profiles:
 

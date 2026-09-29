@@ -103,7 +103,7 @@ config:
       "git status*": allow
 
 skills:
-  - ./skills/common-tools
+  - common-tools
 
 plugins:
   - opencode-wakatime
@@ -584,7 +584,7 @@ Reference:
 
 ```yaml
 skills:
-  - ./skills/browser-debugging
+  - browser-debugging
 ```
 
 Existing Git-backed and experimental external-path behavior remains unchanged.

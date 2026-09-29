@@ -223,7 +223,7 @@ func (r *Runner) webUI(p ocp.Paths, args []string) error {
 		TrustedOrigin: trustedOrigin,
 		OpenCode:      r.OpenCode,
 		Apply: func() (ui.ApplyResult, error) {
-			result, err := r.install(p, source, state.AutoCommit, false, false, false)
+			result, err := r.install(p, source, state.AutoCommit, false, false, false, state.Machine)
 			if err != nil {
 				return ui.ApplyResult{}, err
 			}
@@ -325,7 +325,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		if err != nil {
 			return fmt.Errorf("migrate profiles: %w", err)
 		}
-		if _, err := r.install(p, state.Source, state.AutoCommit, false, options.force, false); err != nil {
+		if _, err := r.install(p, state.Source, state.AutoCommit, false, options.force, false, state.Machine); err != nil {
 			return err
 		}
 		if changed {
@@ -361,7 +361,11 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 				return err
 			}
 		}
-		return r.setupNonInteractive(p, source, options.repo, options.noAuto, options.force)
+		machine, err := resolveMachineName(options.machine, "")
+		if err != nil {
+			return err
+		}
+		return r.setupNonInteractive(p, source, options.repo, options.noAuto, options.force, machine)
 	}
 	source := p.OCPSrc
 	sourceExplicit := true
@@ -379,22 +383,26 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		return e
 	}
 	activeProfile := ""
+	machine, e := r.promptMachineName(options.machine)
+	if e != nil {
+		return e
+	}
 	switch method {
 	case 0:
-		e = r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
+		e = r.setupNew(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force, machine)
 	case 1:
-		e = r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, &options.force)
+		e = r.setupImportOpenCode(p, &source, &sourceExplicit, &autoCommit, &options.force, machine)
 	case 2:
 		if hasOPM {
-			e = r.setupImportOPM(p, &source, &autoCommit, &options.force)
+			e = r.setupImportOPM(p, &source, &autoCommit, &options.force, machine)
 		} else {
-			e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
+			e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force, machine)
 		}
 	case 3:
 		if !hasOPM {
 			return fmt.Errorf("invalid selection")
 		}
-		e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force)
+		e = r.setupExistingRepo(p, &source, &sourceExplicit, &repoVar, &repoExplicit, &autoCommit, &options.force, machine)
 	default:
 		return fmt.Errorf("invalid selection")
 	}
@@ -411,7 +419,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	} else if selErr != nil && !strings.Contains(selErr.Error(), "EOF") {
 		return selErr
 	}
-	e = r.setupRun(p, source, sourceExplicit, repoVar, repoExplicit, autoCommit, options.force, activeProfile)
+	e = r.setupRun(p, source, sourceExplicit, repoVar, repoExplicit, autoCommit, options.force, activeProfile, machine)
 	if e != nil {
 		return e
 	}
@@ -423,7 +431,7 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	return nil
 }
 
-func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
+func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool, machine string) error {
 	mode, e := r.promptMenu(r.Out, "Repository type?", []string{
 		"Local only (no Git)",
 		"Back it with a Git repository",
@@ -446,10 +454,10 @@ func (r *Runner) setupNew(p ocp.Paths, source *string, sourceExplicit *bool, rep
 		}
 	}
 	*force = true
-	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, *autoCommit, *force, "")
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, *autoCommit, *force, "", machine)
 }
 
-func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit *bool, autoCommit *bool, force *bool) error {
+func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit *bool, autoCommit *bool, force *bool, machine string) error {
 	def := filepath.Join(os.Getenv("HOME"), ".config", "opencode")
 	importPath, e := r.promptTextWithDefault(r.Out, "Input OpenCode configuration directory", def)
 	if e != nil {
@@ -459,7 +467,7 @@ func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit
 		fmt.Fprintln(r.Out, "Skipping import.")
 		*source = p.OCPSrc
 		*sourceExplicit = true
-		return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, true, "")
+		return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, true, "", machine)
 	}
 	*source = p.OCPSrc
 	*sourceExplicit = true
@@ -467,10 +475,10 @@ func (r *Runner) setupImportOpenCode(p ocp.Paths, source *string, sourceExplicit
 		return fmt.Errorf("import: %w", e)
 	}
 	fmt.Fprintln(r.Out, "Imported OpenCode configuration.")
-	return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, true, "")
+	return r.setupRun(p, *source, *sourceExplicit, "", false, *autoCommit, true, "", machine)
 }
 
-func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool) error {
+func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *bool, repo *string, repoExplicit *bool, autoCommit *bool, force *bool, machine string) error {
 	url, e := r.promptText(r.Out, "Git repository URL or path:")
 	if e != nil {
 		return e
@@ -500,10 +508,10 @@ func (r *Runner) setupExistingRepo(p ocp.Paths, source *string, sourceExplicit *
 	}
 	*source = p.OCPSrc
 	*sourceExplicit = true
-	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, true, *force, "")
+	return r.setupRun(p, *source, *sourceExplicit, *repo, *repoExplicit, true, *force, "", machine)
 }
 
-func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo string, repoExplicit bool, autoCommit bool, force bool, activeProfile string) error {
+func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo string, repoExplicit bool, autoCommit bool, force bool, activeProfile string, machine string) error {
 	if sourceExplicit && !filepath.IsAbs(source) {
 		var err error
 		source, err = canonical(source)
@@ -561,7 +569,7 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 	} else if e != nil {
 		return e
 	}
-	if _, e := r.install(p, source, autoCommit, true, force, true); e != nil {
+	if _, e := r.install(p, source, autoCommit, true, force, true, machine); e != nil {
 		return e
 	}
 	if activeProfile != "" {
@@ -572,12 +580,12 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 	return nil
 }
 
-func (r *Runner) setupNonInteractive(p ocp.Paths, source string, repo string, noAuto bool, force bool) error {
+func (r *Runner) setupNonInteractive(p ocp.Paths, source string, repo string, noAuto bool, force bool, machine string) error {
 	auto := !noAuto
 	if !filepath.IsAbs(source) {
 		source = filepath.Clean(source)
 	}
-	e := r.setupRun(p, source, true, repo, repo != "", auto, force, "")
+	e := r.setupRun(p, source, true, repo, repo != "", auto, force, "", machine)
 	if e != nil {
 		return e
 	}
@@ -624,7 +632,7 @@ func profileNames(source string) ([]string, error) {
 	}
 	return out, nil
 }
-func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, takeover bool) (*installResult, error) {
+func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, takeover bool, machine string) (*installResult, error) {
 	source, e := canonical(source)
 	if e != nil {
 		return nil, fmt.Errorf("canonical source: %w", e)
@@ -637,7 +645,7 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 	if e != nil {
 		return nil, e
 	}
-	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: force, SkillProvider: provider})
+	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: force, SkillProvider: provider, Machine: machine})
 	if e != nil {
 		return nil, e
 	}
@@ -651,7 +659,7 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 				break
 			}
 		}
-		if e := ocp.TakeOver(p, active, ocp.State{Source: source, AutoCommit: auto}); e != nil {
+		if e := ocp.TakeOver(p, active, ocp.State{Source: source, AutoCommit: auto, Machine: machine}); e != nil {
 			return nil, e
 		}
 	} else {
@@ -675,7 +683,7 @@ func (r *Runner) apply(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
-	res, e := r.install(p, s.Source, s.AutoCommit, false, options.force, false)
+	res, e := r.install(p, s.Source, s.AutoCommit, false, options.force, false, s.Machine)
 	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "apply")
 	}
@@ -693,7 +701,7 @@ func (r *Runner) confirmDrift(p ocp.Paths, s *ocp.State, d *ocp.DriftError, comm
 	}
 	fmt.Fprintf(r.Out, "Generated files will be overwritten:\n  %s\nContinue? [y/N] ", strings.Join(d.Paths, "\n  "))
 	if r.confirm() {
-		res, e := r.install(p, s.Source, s.AutoCommit, false, true, false)
+		res, e := r.install(p, s.Source, s.AutoCommit, false, true, false, s.Machine)
 		if res != nil && e == nil {
 			fmt.Fprintf(r.Out, "Applied profile: %s\n", res.Active)
 			for _, w := range res.Warnings {
@@ -718,7 +726,11 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
-	rr, e := repository.Sync(s.Source, s.AutoCommit, "ocp: synchronize configuration")
+	message := "ocp: synchronize configuration"
+	if s.Machine != "" {
+		message = "sync from " + s.Machine
+	}
+	rr, e := repository.Sync(s.Source, s.AutoCommit, message)
 	if e != nil {
 		return fmt.Errorf("sync repository: %w", e)
 	}
@@ -745,7 +757,7 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 		}
 		r.reportRepository(lockResult)
 	}
-	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: options.force, SkillProvider: provider})
+	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: options.force, SkillProvider: provider, Machine: s.Machine})
 	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "sync")
 	}
@@ -909,6 +921,9 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 	}
 	fmt.Fprintf(r.Out, "Source: %s\n", source)
 	r.c.Printf("Auto-commit: %t", s.AutoCommit)
+	if s.Machine != "" {
+		r.c.Print("Machine: " + s.Machine)
+	}
 	if active == "none" {
 		r.c.Muted("Active profile: none")
 	} else {
@@ -1006,6 +1021,50 @@ func (r *Runner) promptTextWithDefault(out io.Writer, prompt, def string) (strin
 	return line, nil
 }
 
+func defaultMachineName() string {
+	name, err := os.Hostname()
+	if err != nil || strings.TrimSpace(name) == "" {
+		return "local"
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		name = name[:i]
+	}
+	if name == "" {
+		return "local"
+	}
+	return name
+}
+
+// resolveMachineName validates an explicit machine name or falls back to the
+// local hostname. Empty input returns the default without prompting.
+func resolveMachineName(explicit, prompted string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(explicit))
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(prompted))
+	}
+	if name == "" {
+		name = defaultMachineName()
+	}
+	if err := config.ValidMachineName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// promptMachineName resolves the machine identity for interactive setup,
+// offering the hostname as an editable default.
+func (r *Runner) promptMachineName(explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return resolveMachineName(explicit, "")
+	}
+	answer, e := r.promptTextWithDefault(r.Out, "Machine name", defaultMachineName())
+	if e != nil {
+		return "", e
+	}
+	return resolveMachineName("", answer)
+}
+
 func (r *Runner) promptMenuDynamic(out io.Writer, title string, hasOPM bool) (int, error) {
 	options := []string{
 		"Create a new local setup",
@@ -1036,7 +1095,7 @@ func (r *Runner) promptMenuDynamic(out io.Writer, title string, hasOPM bool) (in
 	return r.promptMenuDynamic(out, title, hasOPM)
 }
 
-func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, force *bool) error {
+func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, force *bool, machine string) error {
 	opmDir := importer.DefaultOPMProfileDir()
 	profiles, err := importer.ListOPMProfiles(opmDir)
 	if err != nil {
@@ -1045,7 +1104,7 @@ func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, f
 	if len(profiles) == 0 {
 		r.c.Muted("No OPM profiles found.")
 		*source = p.OCPSrc
-		return r.setupRun(p, *source, true, "", false, *autoCommit, true, "")
+		return r.setupRun(p, *source, true, "", false, *autoCommit, true, "", machine)
 	}
 	selected, err := r.selectProfiles(profiles, "Choose profiles to import:")
 	if err != nil {
@@ -1054,7 +1113,7 @@ func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, f
 	if len(selected) == 0 {
 		r.c.Muted("Skipping OPM import.")
 		*source = p.OCPSrc
-		return r.setupRun(p, *source, true, "", false, *autoCommit, true, "")
+		return r.setupRun(p, *source, true, "", false, *autoCommit, true, "", machine)
 	}
 	for _, name := range selected {
 		r.c.Success("Imported OPM profile: " + name)
@@ -1079,7 +1138,7 @@ func (r *Runner) setupImportOPM(p ocp.Paths, source *string, autoCommit *bool, f
 			return fmt.Errorf("merge OPM profiles: %w", e)
 		}
 	}
-	return r.setupRun(p, *source, true, "", false, *autoCommit, true, "")
+	return r.setupRun(p, *source, true, "", false, *autoCommit, true, "", machine)
 }
 
 func selectedMarker(idx int, sel map[int]bool, writer *color.Writer) string {

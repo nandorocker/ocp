@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,6 +64,7 @@ func envOr(name, fallback string) string {
 type State struct {
 	Version           int    `json:"version"`
 	Source            string `json:"source"`
+	Machine           string `json:"machine,omitempty"`
 	PreservedOriginal string `json:"preserved_original,omitempty"`
 	AutoCommit        bool   `json:"auto_commit"`
 }
@@ -138,6 +140,7 @@ type RenderOptions struct {
 	Source        string
 	Force         bool
 	SkillProvider SkillProvider
+	Machine       string
 }
 type RenderResult struct {
 	Profiles []string
@@ -166,7 +169,7 @@ func Render(o RenderOptions) (RenderResult, error) {
 	if err != nil {
 		return RenderResult{}, err
 	}
-	profiles, err := doc.ResolveFromDir(source)
+	profiles, err := doc.ResolveFromDirForMachine(source, o.Machine)
 	if err != nil {
 		return RenderResult{}, err
 	}
@@ -187,7 +190,7 @@ func Render(o RenderOptions) (RenderResult, error) {
 	defer os.RemoveAll(tmp)
 	result := RenderResult{Profiles: make([]string, 0, len(profiles))}
 	for _, profile := range profiles {
-		warnings, err := renderProfile(filepath.Join(tmp, profile.Name), source, profile, o.SkillProvider)
+		warnings, err := renderProfile(filepath.Join(tmp, profile.Name), source, profile, o.SkillProvider, o.Machine)
 		if err != nil {
 			return RenderResult{}, err
 		}
@@ -214,7 +217,7 @@ func Render(o RenderOptions) (RenderResult, error) {
 	return result, nil
 }
 
-func renderProfile(dest, source string, p config.Profile, provider SkillProvider) ([]string, error) {
+func renderProfile(dest, source string, p config.Profile, provider SkillProvider, machine string) ([]string, error) {
 	if err := os.MkdirAll(dest, 0o700); err != nil {
 		return nil, err
 	}
@@ -224,7 +227,28 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 		return nil, err
 	}
 	if native["plugin"] != nil || len(p.Plugins) != 0 {
-		native["plugin"] = unique(append(plugins, p.Plugins...))
+		plugins = unique(append(plugins, p.Plugins...))
+		for i, plugin := range plugins {
+			if strings.HasPrefix(plugin, "file:") || filepath.IsAbs(plugin) {
+				return nil, fmt.Errorf("plugin %q must be under plugins/", plugin)
+			}
+			if !localPlugin(plugin) {
+				continue
+			}
+			path, err := localSourcePath(source, "plugins", plugin)
+			if err != nil {
+				return nil, fmt.Errorf("plugin %q: %w", plugin, err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return nil, fmt.Errorf("plugin %q: %w", plugin, err)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("plugin %q must be a regular file", plugin)
+			}
+			plugins[i] = (&url.URL{Scheme: "file", Path: path}).String()
+		}
+		native["plugin"] = unique(plugins)
 	}
 	agents := map[string]any{}
 	if old, ok := native["agent"]; ok {
@@ -285,11 +309,17 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 	if err := atomicFile(filepath.Join(dest, "opencode.json"), append(b, '\n'), 0o600); err != nil {
 		return nil, err
 	}
-	var warnings []string
 	var instructions []byte
-	for _, name := range p.Instructions {
+	names := p.Instructions
+	if machine != "" {
+		names = append(append([]string(nil), names...), filepath.Join("hosts", machine+".md"))
+	}
+	for _, name := range names {
 		b, err := readSource(source, name, false)
 		if err != nil {
+			if machine != "" && name == filepath.Join("hosts", machine+".md") && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, fmt.Errorf("instruction %q: %w", name, err)
 		}
 		instructions = append(instructions, b...)
@@ -314,7 +344,6 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 	used := map[string]bool{}
 	for _, skill := range p.Skills {
 		path := skill.Source
-		external := filepath.IsAbs(path)
 		provided := false
 		if isGit(skill.Source) {
 			if provider == nil {
@@ -327,12 +356,10 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 			}
 			provided = true
 		}
-		if !external && !provided {
-			path = filepath.Join(source, path)
-			if !within(source, path) {
-				return nil, fmt.Errorf("skill %q escapes source", skill.Source)
-			}
-			if err := sourcePathSafe(source, path); err != nil {
+		if !provided {
+			var err error
+			path, err = localSourcePath(source, "skills", path)
+			if err != nil {
 				return nil, fmt.Errorf("skill %q: %w", skill.Source, err)
 			}
 		}
@@ -342,17 +369,50 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 		}
 		used[base] = true
 		if _, err := os.Stat(path); err != nil {
-			if external && errors.Is(err, os.ErrNotExist) {
-				warnings = append(warnings, "local skill path not found: "+path)
-				continue
-			}
 			return nil, fmt.Errorf("skill %q: %w", skill.Source, err)
 		}
 		if err := copyTree(filepath.Join(dest, "skills", base), path); err != nil {
 			return nil, err
 		}
 	}
-	return warnings, writeManifest(dest)
+	return nil, writeManifest(dest)
+}
+
+// localSourcePath resolves a repository-local declaration inside its standard
+// directory. Explicit ./folder/ paths remain valid for existing sources.
+func localSourcePath(source, folder, ref string) (string, error) {
+	if filepath.IsAbs(ref) {
+		return "", fmt.Errorf("must be under %s/", folder)
+	}
+	name := ref
+	if strings.HasPrefix(name, "./") {
+		name = strings.TrimPrefix(name, "./")
+		if !strings.HasPrefix(name, folder+"/") {
+			return "", fmt.Errorf("must be under %s/", folder)
+		}
+	} else if !strings.HasPrefix(name, folder+"/") {
+		name = filepath.Join(folder, name)
+	}
+	root := filepath.Join(source, folder)
+	path := filepath.Join(source, name)
+	if path == root || !within(root, path) {
+		return "", fmt.Errorf("must be under %s/", folder)
+	}
+	if err := sourcePathSafe(source, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func localPlugin(name string) bool {
+	if strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "plugins/") {
+		return true
+	}
+	switch filepath.Ext(name) {
+	case ".ts", ".js", ".mjs", ".cjs", ".mts", ".cts":
+		return true
+	}
+	return false
 }
 
 func modelFromConfig(values map[string]any) string {

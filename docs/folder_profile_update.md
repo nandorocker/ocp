@@ -85,7 +85,7 @@ config:
       "git diff*": allow
 
 skills:
-  - ./skills/my-local-skill
+  - my-local-skill
   - https://github.com/example/shared-skill
 
 plugins:
@@ -407,7 +407,7 @@ They can be referenced from global config or profile config:
 
 ```yaml
 skills:
-  - ./skills/browser-testing
+  - browser-testing
 ```
 
 Git-backed skills continue to be declared in YAML:

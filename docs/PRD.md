@@ -306,10 +306,10 @@ OCP supports three skill-source categories.
 
 ```yaml
 skills:
-  - ./skills/my-skill
+  - my-skill
 ```
 
-The path is relative to the canonical OCP repository.
+The path is relative to the canonical repository's `skills/` directory. Nested paths such as `apple/swiftlint` are supported; local skills outside `skills/` are rejected. Legacy `./skills/...` declarations remain readable.
 
 Example:
 
@@ -355,36 +355,17 @@ skills:
 
 OCP should prefer explicit syntax over guessing.
 
-### 6.3 External local path — experimental
+### 6.3 Local source boundaries
 
-Example:
-
-```yaml
-skills:
-  - /home/user/my-experimental-skill
-```
-
-External paths are not synchronized.
-
-If the path does not exist on a machine:
-
-```text
-Warning: local skill path not found:
-  /home/user/my-experimental-skill
-
-Skipped while rendering.
-```
-
-The profile should still render successfully.
-
-Broken experimental local paths are warnings, not fatal errors.
+Repository-local skills must live under `skills/`. Absolute and escaping local paths are rejected instead of creating machine-specific dependencies.
 
 ### 6.4 Skill source parsing
 
 MVP parsing rules:
 
-- `./...` or `../...` → repository-relative local path
-- absolute Unix/macOS filesystem path → external local path
+- bare name or nested path → local path under `skills/`
+- `./skills/...` → legacy explicit local path under `skills/`
+- absolute or escaping local path → error
 - explicit HTTP(S) Git URL → Git-backed skill
 - expanded `git:` form → Git-backed skill
 
@@ -496,6 +477,8 @@ plugins:
 
 OCP renders them into native OpenCode configuration.
 
+Repository-local plugin files live under `plugins/` and use paths relative to that folder (for example, `harness-bridge.ts`). Legacy `./plugins/...` declarations remain readable. Local plugin paths outside `plugins/` are rejected.
+
 OpenCode/Bun remains responsible for:
 
 - plugin fetching
@@ -582,7 +565,7 @@ Example:
 
 ```yaml
 skills:
-  - ./skills/common
+  - common
 
 plugins:
   - foo
@@ -590,11 +573,11 @@ plugins:
 profiles:
   lean:
     skills:
-      - ./skills/fast
+      - fast
 
   deep:
     skills:
-      - ./skills/research
+      - research
 ```
 
 Resolved result:
@@ -711,7 +694,7 @@ OCP must be able to recreate it from:
 ocp.yaml
 + ocp.lock
 + repository-managed source files
-+ available experimental local paths
++ repository-local skills and plugins
 ```
 
 ---
@@ -1161,21 +1144,42 @@ OCP should avoid encouraging secrets to be committed into the canonical reposito
 
 ## 23. Machine-Specific Configuration
 
-Formal machine-specific overlays are out of scope for MVP.
+Each installation has an explicit machine name, captured during `ocp setup`
+(defaulting to the hostname, overridable with `--machine`) and stored in local
+state. The name drives machine-aware rendering from one shared source.
 
-The same canonical configuration should normally render equivalently across supported machines.
-
-Experimental external local paths are the only deliberate machine-local exception.
-
-Formal functionality such as:
+Profiles support two optional keys:
 
 ```yaml
-machines:
-  server:
-    ...
+profiles:
+  hybrid:
+    config:
+      model: openai/gpt-6-sol
+    machines:
+      windy:
+        config:
+          provider:
+            ollama:
+              options:
+                baseURL: http://127.0.0.1:11434/v1
+  windy-dev:
+    hosts: [windy]
 ```
 
-belongs on the roadmap.
+- `hosts:` restricts profile availability. A profile without `hosts` renders
+  everywhere; with `hosts` it renders only on listed machines and is hidden
+  from `list`, `use`, and `run` elsewhere. Extending an unavailable profile
+  skips the child, unless the child contradicts with its own `hosts` entry.
+- `machines:` holds per-machine overlays merged over the shared base
+  (deep merge for config, additive for skills/plugins/instructions/agents).
+  Overlays never nest `hosts`, `machines`, or `extends`.
+- When the machine is named `windy`, OCP automatically appends
+  `hosts/windy.md` to each rendered profile's `AGENTS.md` when the file
+  exists. No declaration is required.
+
+Machine-local differences use these named-machine rules rather than external
+local paths. `ocp sync` labels automatic commits with the machine name
+(`sync from windy`).
 
 ---
 
@@ -1318,7 +1322,7 @@ Potential checks:
 - OCP repository health
 - Git authentication/access
 - malformed configuration
-- missing experimental local paths
+- missing repository-local skills or plugins
 - unavailable skill repositories
 - lockfile inconsistencies
 - generated drift

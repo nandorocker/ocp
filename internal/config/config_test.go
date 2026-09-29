@@ -190,6 +190,23 @@ profiles:
 	}
 }
 
+func TestLocalSkillAndPluginShorthandsMergeWithExplicitPaths(t *testing.T) {
+	profiles, err := Resolve(loadText(t, `version: 1
+skills: [./skills/apple/swiftlint]
+plugins: [./plugins/bridge.ts]
+profiles:
+  deep:
+    skills: [apple/swiftlint]
+    plugins: [bridge.ts]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles[0].Skills) != 1 || len(profiles[0].Plugins) != 1 {
+		t.Fatalf("duplicate local dependencies: skills=%#v plugins=%#v", profiles[0].Skills, profiles[0].Plugins)
+	}
+}
+
 func TestPluginVersionOverride(t *testing.T) {
 	profiles, err := Resolve(loadText(t, `version: 1
 plugins: [foo@1, "@scope/bar@1"]
@@ -575,5 +592,166 @@ func TestMigrateProfilesRecoversAfterProfilesPublish(t *testing.T) {
 	}
 	if _, err := doc.ResolveFromDir(dir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHostsFiltersProfilesPerMachine(t *testing.T) {
+	doc := loadText(t, `version: 1
+profiles:
+  shared: {}
+  windy-only:
+    hosts: [windy]
+  cosmonaut-only:
+    hosts: [cosmonaut]
+`)
+	windy, err := ResolveForMachine(doc, "windy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, p := range windy {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "shared,windy-only" {
+		t.Fatalf("windy profiles = %q", names)
+	}
+	cosmonaut, err := ResolveForMachine(doc, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names = names[:0]
+	for _, p := range cosmonaut {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "cosmonaut-only,shared" {
+		t.Fatalf("cosmonaut profiles = %q", names)
+	}
+	all, err := Resolve(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unfiltered profiles = %d, want 3", len(all))
+	}
+}
+
+func TestMachinesOverlayMergesPerMachine(t *testing.T) {
+	doc := loadText(t, `version: 1
+profiles:
+  hybrid:
+    config:
+      model: shared-model
+      provider:
+        shared:
+          baseURL: http://shared/v1
+    skills: [stop-slop]
+    machines:
+      windy:
+        config:
+          provider:
+            ollama:
+              baseURL: http://127.0.0.1:11434/v1
+        skills: [windy-extra]
+`)
+	windy, err := ResolveForMachine(doc, "windy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windy) != 1 {
+		t.Fatalf("profiles = %#v", windy)
+	}
+	cfg := windy[0].Config
+	if cfg["model"] != "shared-model" {
+		t.Fatalf("model = %v", cfg["model"])
+	}
+	provider := cfg["provider"].(map[string]any)
+	if _, ok := provider["shared"]; !ok {
+		t.Fatalf("shared provider lost: %#v", provider)
+	}
+	ollama, ok := provider["ollama"].(map[string]any)
+	if !ok || ollama["baseURL"] != "http://127.0.0.1:11434/v1" {
+		t.Fatalf("ollama overlay missing: %#v", provider)
+	}
+	var skills []string
+	for _, s := range windy[0].Skills {
+		skills = append(skills, s.Source)
+	}
+	if strings.Join(skills, ",") != "stop-slop,windy-extra" {
+		t.Fatalf("skills = %q", skills)
+	}
+	other, err := ResolveForMachine(doc, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := other[0].Config["provider"].(map[string]any)["ollama"]; ok {
+		t.Fatalf("windy overlay leaked to cosmonaut: %#v", other[0].Config)
+	}
+}
+
+func TestHostsInheritedThroughExtends(t *testing.T) {
+	doc := loadText(t, `version: 1
+profiles:
+  base:
+    hosts: [windy]
+  child:
+    extends: base
+`)
+	windy, err := ResolveForMachine(doc, "windy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windy) != 2 {
+		t.Fatalf("windy profiles = %d, want 2", len(windy))
+	}
+	cosmonaut, err := ResolveForMachine(doc, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cosmonaut) != 0 {
+		t.Fatalf("cosmonaut profiles = %#v, want none", cosmonaut)
+	}
+}
+
+func TestExtendsUnavailableProfileErrors(t *testing.T) {
+	doc := loadText(t, `version: 1
+profiles:
+  base:
+    hosts: [windy]
+  child:
+    extends: base
+    hosts: [cosmonaut]
+`)
+	if _, err := ResolveForMachine(doc, "cosmonaut"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("error = %v, want unavailable parent", err)
+	}
+}
+
+func TestMachinesRejectsNestedKeys(t *testing.T) {
+	for _, text := range []string{
+		"version: 1\nprofiles:\n  deep:\n    machines:\n      windy:\n        hosts: [windy]\n",
+		"version: 1\nprofiles:\n  deep:\n    machines:\n      windy:\n        machines:\n          windy: {}\n",
+		"version: 1\nprofiles:\n  deep:\n    machines:\n      windy:\n        extends: base\n",
+		"version: 1\nprofiles:\n  deep:\n    machines:\n      'bad name!': {}\n",
+	} {
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("Load(%q) succeeded", text)
+		}
+	}
+}
+
+func TestValidMachineName(t *testing.T) {
+	for _, name := range []string{"windy", "cosmonaut", "mac-studio", "host_1", "a.b"} {
+		if err := ValidMachineName(name); err != nil {
+			t.Fatalf("ValidMachineName(%q) = %v", name, err)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "bad name!", "a/b", "x@y"} {
+		if err := ValidMachineName(name); err == nil {
+			t.Fatalf("ValidMachineName(%q) succeeded", name)
+		}
 	}
 }

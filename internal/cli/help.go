@@ -16,7 +16,7 @@ type command struct {
 
 type setupOptions struct {
 	noAuto, force, migrate bool
-	repo, source           string
+	repo, source, machine  string
 }
 
 func configureSetup(f *flag.FlagSet, o *setupOptions) {
@@ -25,6 +25,7 @@ func configureSetup(f *flag.FlagSet, o *setupOptions) {
 	f.BoolVar(&o.migrate, "migrate-profiles", false, "move inline profiles into profiles/*.yaml")
 	f.StringVar(&o.repo, "repo", "", "repository URL for non-interactive mode")
 	f.StringVar(&o.source, "source", "", "source directory for non-interactive mode")
+	f.StringVar(&o.machine, "machine", "", "machine name (defaults to hostname)")
 }
 
 type forceOptions struct{ force bool }

@@ -30,7 +30,19 @@ type Document struct {
 
 // ProfileSpec is an unresolved profile declaration.
 type ProfileSpec struct {
-	Extends      string           `yaml:",omitempty"`
+	Extends      string                    `yaml:",omitempty"`
+	Hosts        []string                  `yaml:"hosts,omitempty"`
+	Machines     map[string]MachineOverlay `yaml:"machines,omitempty"`
+	Config       map[string]any            `yaml:"config,omitempty"`
+	Instructions []string                  `yaml:"instructions,omitempty"`
+	Skills       []Skill                   `yaml:"skills,omitempty"`
+	Plugins      []string                  `yaml:"plugins,omitempty"`
+	Agents       map[string]Agent          `yaml:"agents,omitempty"`
+}
+
+// MachineOverlay holds per-machine overrides applied on top of a profile's
+// shared base. Keys are machine names; values never nest further.
+type MachineOverlay struct {
 	Config       map[string]any   `yaml:"config,omitempty"`
 	Instructions []string         `yaml:"instructions,omitempty"`
 	Skills       []Skill          `yaml:"skills,omitempty"`
@@ -68,6 +80,8 @@ type Profile struct {
 	Skills       []Skill
 	Plugins      []string
 	Agents       map[string]Agent
+	Hosts        []string
+	Machines     map[string]MachineOverlay
 }
 
 // Load parses and validates an OCP document from path.
@@ -95,13 +109,19 @@ func Load(path string) (*Document, error) {
 
 // Resolve returns all fully composed profiles sorted by name.
 func Resolve(doc *Document) ([]Profile, error) {
+	return ResolveForMachine(doc, "")
+}
+
+// ResolveForMachine returns composed profiles for a machine, dropping
+// profiles whose hosts list excludes it and merging per-machine overlays.
+func ResolveForMachine(doc *Document, machine string) ([]Profile, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("document is nil")
 	}
 	if !doc.profilesDeclared {
 		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
 	}
-	return resolveProfiles(doc, doc.Profiles)
+	return resolveProfiles(doc, doc.Profiles, machine)
 }
 
 type composition struct {
@@ -110,29 +130,88 @@ type composition struct {
 	skills       []Skill
 	plugins      []string
 	agents       map[string]Agent
+	hosts        []string
+	machines     map[string]MachineOverlay
 }
 
 func compositionFromDocument(d *Document) composition {
-	return composition{d.Config, d.Instructions, d.Skills, d.Plugins, d.Agents}
+	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents}
 }
 func compositionFromProfile(p ProfileSpec) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines}
 }
 func compositionFromResolved(p Profile) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines}
+}
+func compositionFromOverlay(o MachineOverlay) composition {
+	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil}
 }
 func resolved(name string, c composition) Profile {
-	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents)}
+	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines)}
 }
 
 func mergeComposition(base, child composition) composition {
+	hosts := base.hosts
+	if len(child.hosts) != 0 {
+		hosts = child.hosts
+	}
 	return composition{
 		config:       mergeMap(base.config, child.config),
 		instructions: appendUnique(base.instructions, child.instructions),
 		skills:       mergeSkills(base.skills, child.skills),
 		plugins:      mergePlugins(base.plugins, child.plugins),
 		agents:       mergeAgents(base.agents, child.agents),
+		hosts:        append([]string(nil), hosts...),
+		machines:     mergeMachines(base.machines, child.machines),
 	}
+}
+
+// mergeMachines combines per-machine overlays. Child entries win per machine,
+// with each machine's overlay itself merged compositionally.
+func mergeMachines(base, child map[string]MachineOverlay) map[string]MachineOverlay {
+	if len(base) == 0 && len(child) == 0 {
+		return nil
+	}
+	out := make(map[string]MachineOverlay, len(base)+len(child))
+	for name, overlay := range base {
+		out[name] = cloneMachineOverlay(overlay)
+	}
+	for name, overlay := range child {
+		if existing, ok := out[name]; ok {
+			merged := mergeComposition(compositionFromOverlay(existing), compositionFromOverlay(overlay))
+			out[name] = MachineOverlay{
+				Config:       merged.config,
+				Instructions: merged.instructions,
+				Skills:       merged.skills,
+				Plugins:      merged.plugins,
+				Agents:       merged.agents,
+			}
+			continue
+		}
+		out[name] = cloneMachineOverlay(overlay)
+	}
+	return out
+}
+
+func cloneMachineOverlay(o MachineOverlay) MachineOverlay {
+	return MachineOverlay{
+		Config:       cloneMap(o.Config),
+		Instructions: append([]string(nil), o.Instructions...),
+		Skills:       append([]Skill(nil), o.Skills...),
+		Plugins:      append([]string(nil), o.Plugins...),
+		Agents:       cloneAgents(o.Agents),
+	}
+}
+
+func cloneMachines(in map[string]MachineOverlay) map[string]MachineOverlay {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]MachineOverlay, len(in))
+	for name, overlay := range in {
+		out[name] = cloneMachineOverlay(overlay)
+	}
+	return out
 }
 
 func mergePlugins(base, child []string) []string {
@@ -154,6 +233,15 @@ func mergePlugins(base, child []string) []string {
 }
 
 func pluginIdentity(plugin string) string {
+	if strings.HasPrefix(plugin, "./plugins/") {
+		return strings.TrimPrefix(plugin, "./")
+	}
+	if strings.HasPrefix(plugin, "plugins/") {
+		return plugin
+	}
+	if strings.HasSuffix(plugin, ".ts") || strings.HasSuffix(plugin, ".js") || strings.HasSuffix(plugin, ".mjs") || strings.HasSuffix(plugin, ".cjs") || strings.HasSuffix(plugin, ".mts") || strings.HasSuffix(plugin, ".cts") {
+		return "plugins/" + plugin
+	}
 	if strings.HasPrefix(plugin, "@") {
 		if slash := strings.IndexByte(plugin, '/'); slash >= 0 {
 			if version := strings.LastIndexByte(plugin, '@'); version > slash {
@@ -187,26 +275,36 @@ func mergeSkills(base, child []Skill) []Skill {
 	byDeclaration, bySource := make(map[string]int), make(map[string]int)
 	for i, skill := range out {
 		byDeclaration[skill.declaration()] = i
-		bySource[skill.Source] = i
+		bySource[skillSourceIdentity(skill.Source)] = i
 	}
 	for _, skill := range child {
 		if _, ok := byDeclaration[skill.declaration()]; ok {
 			continue
 		}
-		if i, ok := bySource[skill.Source]; ok {
+		if i, ok := bySource[skillSourceIdentity(skill.Source)]; ok {
 			delete(byDeclaration, out[i].declaration())
 			out[i] = skill
 			byDeclaration[skill.declaration()] = i
 			continue
 		}
 		byDeclaration[skill.declaration()] = len(out)
-		bySource[skill.Source] = len(out)
+		bySource[skillSourceIdentity(skill.Source)] = len(out)
 		out = append(out, skill)
 	}
 	return out
 }
 
-func (s Skill) declaration() string { return s.Source + "\x00" + s.Ref }
+func (s Skill) declaration() string { return skillSourceIdentity(s.Source) + "\x00" + s.Ref }
+
+func skillSourceIdentity(source string) string {
+	if strings.HasPrefix(source, "./skills/") {
+		return strings.TrimPrefix(source, "./")
+	}
+	if strings.HasPrefix(source, "skills/") || strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") || strings.HasPrefix(source, "ssh://") || strings.HasPrefix(source, "git@") || filepath.IsAbs(source) {
+		return source
+	}
+	return "skills/" + source
+}
 
 func mergeAgents(base, child map[string]Agent) map[string]Agent {
 	out := cloneAgents(base)
@@ -329,38 +427,100 @@ func profiles(node *yaml.Node) (map[string]ProfileSpec, error) {
 		if err := validName("profile", name); err != nil {
 			return nil, err
 		}
-		values, err := mapping(node.Content[i+1], "profile "+name, "extends", "config", "instructions", "skills", "plugins", "agents")
+		spec, err := parseProfileSpec(node.Content[i+1], "profile "+name)
 		if err != nil {
 			return nil, err
 		}
-		var p ProfileSpec
-		if v := values["extends"]; v != nil {
-			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" {
-				return nil, fmt.Errorf("profile %q extends must be a string", name)
-			}
-			if err := v.Decode(&p.Extends); err != nil {
-				return nil, fmt.Errorf("profile %q extends must be a string", name)
-			}
-			if p.Extends == "" {
-				return nil, fmt.Errorf("profile %q extends must not be empty", name)
-			}
+		out[name] = spec
+	}
+	return out, nil
+}
+
+// parseProfileSpec parses a profile mapping, including optional host
+// availability and per-machine overlays.
+func parseProfileSpec(node *yaml.Node, label string) (ProfileSpec, error) {
+	var p ProfileSpec
+	values, err := mapping(node, label, "extends", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents")
+	if err != nil {
+		return p, err
+	}
+	if v := values["extends"]; v != nil {
+		if v.Kind != yaml.ScalarNode || v.Tag != "!!str" {
+			return p, fmt.Errorf("%s extends must be a string", label)
 		}
-		if p.Config, err = nativeMap(values["config"], "profile "+name+" config"); err != nil {
+		if err := v.Decode(&p.Extends); err != nil {
+			return p, fmt.Errorf("%s extends must be a string", label)
+		}
+		if p.Extends == "" {
+			return p, fmt.Errorf("%s extends must not be empty", label)
+		}
+	}
+	if p.Hosts, err = stringsList(values["hosts"], label+" hosts"); err != nil {
+		return p, err
+	}
+	for _, host := range p.Hosts {
+		if err := validName("hosts entry", host); err != nil {
+			return p, err
+		}
+	}
+	if p.Machines, err = parseMachines(values["machines"], label); err != nil {
+		return p, err
+	}
+	if p.Config, err = nativeMap(values["config"], label+" config"); err != nil {
+		return p, err
+	}
+	if p.Instructions, err = stringsList(values["instructions"], label+" instructions"); err != nil {
+		return p, err
+	}
+	if p.Skills, err = skills(values["skills"]); err != nil {
+		return p, err
+	}
+	if p.Plugins, err = stringsList(values["plugins"], label+" plugins"); err != nil {
+		return p, err
+	}
+	if p.Agents, err = agents(values["agents"]); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+// parseMachines parses the per-machine overlay map. Overlays accept the same
+// composition keys as profiles but never nest hosts, machines, or extends.
+func parseMachines(node *yaml.Node, label string) (map[string]MachineOverlay, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s machines must be a mapping", label)
+	}
+	out := make(map[string]MachineOverlay, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		name := node.Content[i].Value
+		if err := validName("machine", name); err != nil {
 			return nil, err
 		}
-		if p.Instructions, err = stringsList(values["instructions"], "profile "+name+" instructions"); err != nil {
+		overlayLabel := label + " machines " + name
+		values, err := mapping(node.Content[i+1], overlayLabel, "config", "instructions", "skills", "plugins", "agents")
+		if err != nil {
 			return nil, err
 		}
-		if p.Skills, err = skills(values["skills"]); err != nil {
+		var overlay MachineOverlay
+		if overlay.Config, err = nativeMap(values["config"], overlayLabel+" config"); err != nil {
 			return nil, err
 		}
-		if p.Plugins, err = stringsList(values["plugins"], "profile "+name+" plugins"); err != nil {
+		if overlay.Instructions, err = stringsList(values["instructions"], overlayLabel+" instructions"); err != nil {
 			return nil, err
 		}
-		if p.Agents, err = agents(values["agents"]); err != nil {
+		if overlay.Skills, err = skills(values["skills"]); err != nil {
 			return nil, err
 		}
-		out[name] = p
+		if overlay.Plugins, err = stringsList(values["plugins"], overlayLabel+" plugins"); err != nil {
+			return nil, err
+		}
+		if overlay.Agents, err = agents(values["agents"]); err != nil {
+			return nil, err
+		}
+		out[name] = overlay
 	}
 	return out, nil
 }
@@ -369,6 +529,12 @@ func profiles(node *yaml.Node) (map[string]ProfileSpec, error) {
 // the profiles directory contains them. Otherwise it falls back to inline
 // profiles already parsed from ocp.yaml.
 func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
+	return doc.ResolveFromDirForMachine(sourceDir, "")
+}
+
+// ResolveFromDirForMachine resolves profiles for a machine, applying host
+// availability filtering and per-machine overlays.
+func (doc *Document) ResolveFromDirForMachine(sourceDir, machine string) ([]Profile, error) {
 	doc.SourceDir = sourceDir
 
 	profilesDir := filepath.Join(sourceDir, "profiles")
@@ -389,7 +555,7 @@ func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 			if err != nil {
 				return nil, err
 			}
-			return resolveProfiles(doc, fileProfiles)
+			return resolveProfiles(doc, fileProfiles, machine)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read profiles directory: %w", err)
@@ -399,7 +565,7 @@ func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
 	}
 
-	return resolveProfiles(doc, doc.Profiles)
+	return resolveProfiles(doc, doc.Profiles, machine)
 }
 
 func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
@@ -463,27 +629,8 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 			return nil, fmt.Errorf("profile file %q must be a YAML mapping", displayName)
 		}
 
-		values, err := mapping(node.Content[0], "profile file "+base, "extends", "config", "instructions", "skills", "plugins", "agents")
+		spec, err := parseProfileSpec(node.Content[0], "profile file "+base)
 		if err != nil {
-			return nil, err
-		}
-
-		var spec ProfileSpec
-		if v := values["extends"]; v != nil {
-			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" {
-				return nil, fmt.Errorf("profile %q extends must be a string", base)
-			}
-			if err := v.Decode(&spec.Extends); err != nil {
-				return nil, fmt.Errorf("profile %q extends must be a string", base)
-			}
-			if spec.Extends == "" {
-				return nil, fmt.Errorf("profile %q extends must not be empty", base)
-			}
-		}
-		if spec.Config, err = nativeMap(values["config"], "profile "+base+" config"); err != nil {
-			return nil, err
-		}
-		if spec.Instructions, err = stringsList(values["instructions"], "profile "+base+" instructions"); err != nil {
 			return nil, err
 		}
 		if guidePath != "" {
@@ -493,24 +640,17 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 				return nil, fmt.Errorf("inspect profile guide %q: %w", guidePath, err)
 			}
 		}
-		if spec.Skills, err = skills(values["skills"]); err != nil {
-			return nil, err
-		}
-		if spec.Plugins, err = stringsList(values["plugins"], "profile "+base+" plugins"); err != nil {
-			return nil, err
-		}
-		if spec.Agents, err = agents(values["agents"]); err != nil {
-			return nil, err
-		}
 		result[base] = spec
 		profileFiles[base] = entryName
 	}
 	return result, nil
 }
 
-func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec) ([]Profile, error) {
+func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec, machine string) ([]Profile, error) {
 	states := make(map[string]uint8, len(fileProfiles))
 	resolvedProfiles := make(map[string]Profile, len(fileProfiles))
+	// available tracks profiles visible on this machine after host filtering.
+	available := make(map[string]bool, len(fileProfiles))
 	var visit func(string) (Profile, error)
 
 	visit = func(name string) (Profile, error) {
@@ -539,9 +679,34 @@ func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec) ([]
 				return Profile{}, err
 			}
 			base = compositionFromResolved(parent)
+			if !available[ext] && machine != "" {
+				if containsHost(profileSpec.Hosts, machine) {
+					return Profile{}, fmt.Errorf("profile %q extends %q which is unavailable on machine %q", name, ext, machine)
+				}
+				available[name] = false
+				profile := resolved(name, mergeComposition(base, compositionFromProfile(profileSpec)))
+				states[name] = 2
+				resolvedProfiles[name] = profile
+				return profile, nil
+			}
 		}
 
-		profile := resolved(name, mergeComposition(base, compositionFromProfile(profileSpec)))
+		merged := mergeComposition(base, compositionFromProfile(profileSpec))
+		if machine != "" {
+			if len(merged.hosts) != 0 && !containsHost(merged.hosts, machine) {
+				available[name] = false
+				profile := resolved(name, merged)
+				states[name] = 2
+				resolvedProfiles[name] = profile
+				return profile, nil
+			}
+			if overlay, ok := merged.machines[machine]; ok {
+				merged = mergeComposition(merged, compositionFromOverlay(overlay))
+			}
+		}
+		available[name] = true
+
+		profile := resolved(name, merged)
 		states[name] = 2
 		resolvedProfiles[name] = profile
 		return profile, nil
@@ -558,14 +723,28 @@ func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec) ([]
 		if err != nil {
 			return nil, err
 		}
+		if machine != "" && !available[name] {
+			continue
+		}
 		profiles = append(profiles, profile)
 	}
 	return profiles, nil
 }
 
+func containsHost(hosts []string, machine string) bool {
+	for _, host := range hosts {
+		if host == machine {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneProfileSpec(ps ProfileSpec) ProfileSpec {
 	return ProfileSpec{
 		Extends:      ps.Extends,
+		Hosts:        append([]string(nil), ps.Hosts...),
+		Machines:     cloneMachines(ps.Machines),
 		Config:       cloneMap(ps.Config),
 		Instructions: append([]string(nil), ps.Instructions...),
 		Skills:       append([]Skill(nil), ps.Skills...),
@@ -803,6 +982,11 @@ func validName(kind, name string) error {
 	return nil
 }
 
+// ValidMachineName reports whether name is usable as a machine identity.
+func ValidMachineName(name string) error {
+	return validName("machine", name)
+}
+
 // MigrateProfiles moves legacy inline profiles into profiles/*.yaml.
 // It returns false when the source has no inline profiles.
 func MigrateProfiles(sourceDir string) (bool, error) {
@@ -817,7 +1001,7 @@ func MigrateProfiles(sourceDir string) (bool, error) {
 	if len(doc.Profiles) == 0 {
 		return false, errors.New("cannot migrate empty inline profiles")
 	}
-	if _, err := resolveProfiles(doc, doc.Profiles); err != nil {
+	if _, err := resolveProfiles(doc, doc.Profiles, ""); err != nil {
 		return false, err
 	}
 

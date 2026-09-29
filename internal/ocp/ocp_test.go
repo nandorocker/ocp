@@ -130,6 +130,92 @@ func TestRenderMaterializesNativeFiles(t *testing.T) {
 	}
 }
 
+func TestRenderResolvesLocalPluginsAgainstSource(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nconfig:\n  plugin: [./plugins/bridge.ts]\nplugins: [bridge.ts, package@1]\n")
+	path := filepath.Join(src, "plugins", "bridge.ts")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("export default () => ({})\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	render(t, p, src, false)
+	b, err := os.ReadFile(filepath.Join(p.Current, "default", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native map[string]any
+	if err := json.Unmarshal(b, &native); err != nil {
+		t.Fatal(err)
+	}
+	plugins := native["plugin"].([]any)
+	if len(plugins) != 2 || plugins[0] != "file://"+path || plugins[1] != "package@1" {
+		t.Fatalf("plugin = %#v", plugins)
+	}
+}
+
+func TestRenderRejectsLocalPluginOutsideStandardFolder(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nplugins: [../outside.ts]\n")
+	if _, err := Render(RenderOptions{Paths: p, Source: src}); err == nil || !strings.Contains(err.Error(), "must be under plugins/") {
+		t.Fatalf("escape error = %v", err)
+	}
+	for _, ref := range []string{"./other.ts", "file:///tmp/other.ts"} {
+		if err := os.WriteFile(filepath.Join(src, "ocp.yaml"), []byte("version: 1\nplugins: ["+ref+"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Render(RenderOptions{Paths: p, Source: src}); err == nil || !strings.Contains(err.Error(), "must be under plugins/") {
+			t.Fatalf("plugin %q error = %v", ref, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(src, "plugins"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.ts")
+	if err := os.WriteFile(outside, []byte("plugin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "plugins", "linked.ts")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "ocp.yaml"), []byte("version: 1\nplugins: [./plugins/linked.ts]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Render(RenderOptions{Paths: p, Source: src}); err == nil || !strings.Contains(err.Error(), "symlinks are not allowed") {
+		t.Fatalf("symlink error = %v", err)
+	}
+}
+
+func TestRenderResolvesNestedSkillWithinStandardFolder(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nskills: [apple/swiftlint]\n")
+	path := filepath.Join(src, "skills", "apple", "swiftlint")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	render(t, p, src, false)
+	if _, err := os.Stat(filepath.Join(p.Current, "default", "skills", "swiftlint", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRenderRejectsSkillOutsideStandardFolder(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\n")
+	for _, ref := range []string{"./other", "../other", "/tmp/other"} {
+		if err := os.WriteFile(filepath.Join(src, "ocp.yaml"), []byte("version: 1\nskills: ["+ref+"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Render(RenderOptions{Paths: p, Source: src}); err == nil || !strings.Contains(err.Error(), "must be under skills/") {
+			t.Fatalf("skill %q error = %v", ref, err)
+		}
+	}
+}
+
 func TestRenderMergesNativeAndComposedAgentConfig(t *testing.T) {
 	p := testPaths(t)
 	src := source(t, `version: 1
@@ -445,5 +531,97 @@ func TestDefaultOCPSrcConstantMatchesExpectedValue(t *testing.T) {
 	want := "~/.config/ocp"
 	if DefaultOCPSrc != want {
 		t.Fatalf("DefaultOCPSrc = %q, want %q", DefaultOCPSrc, want)
+	}
+}
+
+func TestRenderIncludesHostInstructionForMachine(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\ninstructions: [shared.md]\n")
+	write := func(name, contents string) {
+		t.Helper()
+		path := filepath.Join(src, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("shared.md", "shared\n")
+	write(filepath.Join("hosts", "windy.md"), "windy\n")
+	r, err := Render(RenderOptions{Paths: p, Source: src, Machine: "windy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Profiles) != 1 {
+		t.Fatalf("profiles = %#v", r.Profiles)
+	}
+	b, err := os.ReadFile(filepath.Join(p.Current, "default", "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "shared\nwindy\n" {
+		t.Fatalf("AGENTS.md = %q", b)
+	}
+}
+
+func TestRenderSkipsMissingHostInstruction(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\ninstructions: [shared.md]\n")
+	path := filepath.Join(src, "shared.md")
+	if err := os.WriteFile(path, []byte("shared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Render(RenderOptions{Paths: p, Source: src, Machine: "cosmonaut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Profiles) != 1 {
+		t.Fatalf("profiles = %#v", r.Profiles)
+	}
+	b, err := os.ReadFile(filepath.Join(p.Current, "default", "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "shared\n" {
+		t.Fatalf("AGENTS.md = %q", b)
+	}
+}
+
+func TestRenderFiltersProfilesByMachine(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nprofiles:\n  shared: {}\n  windy-only:\n    hosts: [windy]\n")
+	r, err := Render(RenderOptions{Paths: p, Source: src, Machine: "cosmonaut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Profiles) != 1 || r.Profiles[0] != "shared" {
+		t.Fatalf("profiles = %#v", r.Profiles)
+	}
+	if _, err := os.Stat(filepath.Join(p.Current, "windy-only")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("windy-only was rendered: %v", err)
+	}
+}
+
+func TestRenderAppliesMachineOverlay(t *testing.T) {
+	p := testPaths(t)
+	src := source(t, "version: 1\nprofiles:\n  hybrid:\n    config:\n      model: shared\n    machines:\n      windy:\n        config:\n          model: windy-model\n")
+	r, err := Render(RenderOptions{Paths: p, Source: src, Machine: "windy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Profiles) != 1 {
+		t.Fatalf("profiles = %#v", r.Profiles)
+	}
+	b, err := os.ReadFile(filepath.Join(p.Current, "hybrid", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native map[string]any
+	if err := json.Unmarshal(b, &native); err != nil {
+		t.Fatal(err)
+	}
+	if native["model"] != "windy-model" {
+		t.Fatalf("model = %#v", native["model"])
 	}
 }
