@@ -8,6 +8,26 @@
   OCP generates and activates reproducible <a href="https://opencode.ai/">OpenCode</a> configuration profiles from one <code>ocp.yaml</code> source.
 </p>
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/main/install.sh | sh
+```
+
+The installer detects your platform, downloads the matching release archive, verifies its SHA-256 checksum, and installs the binary to `~/.local/bin/ocp`. If that directory is not on your `PATH`, add it to your shell profile.
+
+Pin a specific version with `OCP_VERSION`, or override the destination with `OCP_INSTALL`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/main/install.sh | OCP_VERSION=0.1.0 OCP_INSTALL=/usr/local/bin sh
+```
+
+Then initialize OCP:
+
+```bash
+ocp setup
+```
+
 ## Developer Setup
 
 Go 1.26 or newer is required. The simplest way to install OCP for local development:
