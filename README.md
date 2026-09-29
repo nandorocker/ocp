@@ -8,6 +8,10 @@
   OCP generates and activates reproducible <a href="https://opencode.ai/">OpenCode</a> configuration profiles from one <code>ocp.yaml</code> source.
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg"></a>
+</p>
+
 ## Install
 
 ```bash
@@ -168,3 +172,9 @@ The UI binds only to loopback. To use it through a trusted reverse proxy, opt in
 `upgrade` is intentionally deferred in the current MVP implementation. Git-backed skills are initialized during setup or sync and reproduced from `ocp.lock`.
 
 See [`docs/PRD.md`](docs/PRD.md) for the product requirements and configuration model.
+
+## License
+
+Copyright © 2026 Nando Rossi
+
+Released under the [GNU Affero General Public License v3.0](LICENSE). In short: you may use, study, and modify OCP, but if you run a modified version as a network service you must publish your source.

@@ -88,17 +88,11 @@ func Sync(source string, autoCommit bool, message string) (Result, error) {
 				return result, fmt.Errorf("fast-forward upstream: %w", err)
 			}
 		} else {
-			if _, err := git(root, "merge", "--no-edit", "@{upstream}"); err != nil {
-				conflicted, conflictErr := hasConflicts(root)
-				if conflictErr != nil {
-					return result, conflictErr
-				}
-				if conflicted {
-					return result, fmt.Errorf("merge upstream has conflicts requiring manual resolution: %w", err)
-				}
-				return result, fmt.Errorf("merge upstream: %w", err)
+			merged, err := mergeUpstream(root)
+			if err != nil {
+				return result, err
 			}
-			result.Merged = true
+			result.Merged = merged
 		}
 	}
 
@@ -113,6 +107,43 @@ func Sync(source string, autoCommit bool, message string) (Result, error) {
 		result.Pushed = true
 	}
 	return result, nil
+}
+
+// mergeUpstream merges the upstream branch into the worktree. A machine that
+// began with a local-only source and later adopted the shared repository has no
+// common ancestor, so Git refuses the merge; that one case is retried with
+// --allow-unrelated-histories to join the two histories. Any other failure is
+// reported, and genuine conflicts are always left for manual resolution.
+func mergeUpstream(root string) (bool, error) {
+	_, err := git(root, "merge", "--no-edit", "@{upstream}")
+	if err == nil {
+		return true, nil
+	}
+	if !unrelatedHistories(err) {
+		conflicted, conflictErr := hasConflicts(root)
+		if conflictErr != nil {
+			return false, conflictErr
+		}
+		if conflicted {
+			return false, fmt.Errorf("merge upstream has conflicts requiring manual resolution: %w", err)
+		}
+		return false, fmt.Errorf("merge upstream: %w", err)
+	}
+	if _, retryErr := git(root, "merge", "--no-edit", "--allow-unrelated-histories", "@{upstream}"); retryErr != nil {
+		conflicted, conflictErr := hasConflicts(root)
+		if conflictErr != nil {
+			return false, conflictErr
+		}
+		if conflicted {
+			return false, fmt.Errorf("merge upstream has conflicts requiring manual resolution: %w", retryErr)
+		}
+		return false, fmt.Errorf("merge upstream: %w", retryErr)
+	}
+	return true, nil
+}
+
+func unrelatedHistories(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "refusing to merge unrelated histories")
 }
 
 var errNoGit = errors.New("not a Git worktree")

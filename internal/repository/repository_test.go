@@ -165,6 +165,48 @@ func TestSyncReportsPushFailure(t *testing.T) {
 	}
 }
 
+func TestSyncMergesUnrelatedHistoriesOnAdoption(t *testing.T) {
+	// A machine that started with a local-only source and later adopted the
+	// shared repository has no common ancestor with it.
+	shared := filepath.Join(t.TempDir(), "shared.git")
+	gitOK(t, "", "init", "--bare", "--initial-branch=main", shared)
+	seed := clone(t, shared)
+	write(t, filepath.Join(seed, "ocp.yaml"), "version: 1\n")
+	gitOK(t, seed, "add", "-A")
+	gitOK(t, seed, "commit", "-m", "shared config")
+	gitOK(t, seed, "push", "-u", "origin", "HEAD")
+
+	local := filepath.Join(t.TempDir(), "local")
+	if err := os.MkdirAll(local, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitOK(t, local, "init", "-b", "main")
+	gitOK(t, local, "config", "user.name", "Test User")
+	gitOK(t, local, "config", "user.email", "test@example.com")
+	write(t, filepath.Join(local, "ocp.yaml"), "version: 1\n")
+	write(t, filepath.Join(local, "local-note.md"), "local\n")
+	gitOK(t, local, "add", "-A")
+	gitOK(t, local, "commit", "-m", "local config")
+	gitOK(t, local, "remote", "add", "origin", shared)
+	gitOK(t, local, "fetch", "origin")
+	gitOK(t, local, "branch", "--set-upstream-to=origin/main", "main")
+
+	r, err := Sync(local, false, "sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Merged || !r.Pushed {
+		t.Fatalf("result = %+v, want merged and pushed", r)
+	}
+	for _, name := range []string{"ocp.yaml", "local-note.md"} {
+		if _, err := os.Stat(filepath.Join(local, name)); err != nil {
+			t.Fatalf("missing %s after merge: %v", name, err)
+		}
+	}
+	// The shared history must be reachable so later syncs fast-forward cleanly.
+	gitOK(t, local, "merge-base", "--is-ancestor", "origin/main", "HEAD")
+}
+
 func repository(t *testing.T) (local, bare string) {
 	t.Helper()
 	bare = filepath.Join(t.TempDir(), "remote.git")
