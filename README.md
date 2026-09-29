@@ -1,6 +1,12 @@
-# OCP
+<p align="center">
+  <img src="docs/logo.png" alt="OCP logo" width="200">
+</p>
 
-OCP generates and activates reproducible [OpenCode](https://opencode.ai/) configuration profiles from one `ocp.yaml` source.
+<h1 align="center">OCP</h1>
+
+<p align="center">
+  OCP generates and activates reproducible <a href="https://opencode.ai/">OpenCode</a> configuration profiles from one <code>ocp.yaml</code> source.
+</p>
 
 ## Developer Setup
 
