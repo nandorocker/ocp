@@ -919,17 +919,31 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 	if active == "" {
 		active = "none"
 	}
-	fmt.Fprintf(r.Out, "Source: %s\n", source)
-	r.c.Printf("Auto-commit: %t", s.AutoCommit)
+	line := func(label, value string) {
+		fmt.Fprintf(r.Out, "%s %s\n", r.c.Style(color.ANSIDim, label+":"), value)
+	}
+	line("Source", r.c.Style(color.ANSICyan, source))
+	autoCommit := r.c.Style(color.ANSIGreen, "true")
+	if !s.AutoCommit {
+		autoCommit = r.c.Style(color.ANSIYellow, "false")
+	}
+	line("Auto-commit", autoCommit)
 	if s.Machine != "" {
-		r.c.Print("Machine: " + s.Machine)
+		line("Machine", r.c.Style(color.ANSIMagenta, s.Machine))
 	}
 	if active == "none" {
-		r.c.Muted("Active profile: none")
+		line("Active profile", r.c.Style(color.ANSIDim, "none"))
 	} else {
-		r.c.Print("Active profile: " + active)
+		line("Active profile", r.c.Style(color.ANSIGreen, active))
 	}
-	r.c.Printf("Generated profiles: %s", strings.Join(names, ", "))
+	styled := make([]string, len(names))
+	for i, name := range names {
+		styled[i] = name
+		if name == active {
+			styled[i] = r.c.Style(color.ANSIGreen, name)
+		}
+	}
+	line("Generated profiles", strings.Join(styled, ", "))
 	return nil
 }
 func (r *Runner) reset(p ocp.Paths, args []string) error {

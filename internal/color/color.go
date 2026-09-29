@@ -14,10 +14,11 @@ import (
 const (
 	ansiReset   = "\033[0m"
 	ANSIGreen   = "\033[32m"
-	ansiYellow  = "\033[33m"
+	ANSIYellow  = "\033[33m"
 	ansiRed     = "\033[31m"
-	ansiDim     = "\033[2m"
-	ansiMagenta = "\033[35m"
+	ANSIDim     = "\033[2m"
+	ANSIMagenta = "\033[35m"
+	ANSICyan    = "\033[36m"
 )
 
 var colorDisabled atomic.Int32 // 0 = auto-detect, 1 = force disable
@@ -74,7 +75,7 @@ func (c *Writer) CheckErr(msg string) {
 
 // CheckWarn writes a warning indicator to Err.
 func (c *Writer) CheckWarn(msg string) {
-	fmt.Fprintf(c.Err, "%s %s\n", applyColor(c.Err, ansiYellow, "!"), msg)
+	fmt.Fprintf(c.Err, "%s %s\n", applyColor(c.Err, ANSIYellow, "!"), msg)
 }
 
 // Success outputs a green success message.
@@ -84,7 +85,7 @@ func (c *Writer) Success(msg string) {
 
 // Warning outputs a yellow warning message.
 func (c *Writer) Warning(msg string) {
-	fmt.Fprintln(c.Err, applyColor(c.Err, ansiYellow, "Warning: "+msg))
+	fmt.Fprintln(c.Err, applyColor(c.Err, ANSIYellow, "Warning: "+msg))
 }
 
 // Error outputs a red error message.
@@ -94,12 +95,12 @@ func (c *Writer) Error(msg string) {
 
 // Muted outputs dimmed context text.
 func (c *Writer) Muted(msg string) {
-	fmt.Fprintln(c.Out, applyColor(c.Out, ansiDim, msg))
+	fmt.Fprintln(c.Out, applyColor(c.Out, ANSIDim, msg))
 }
 
 // Important outputs a magenta highlighted message.
 func (c *Writer) Important(msg string) {
-	fmt.Fprintln(c.Out, applyColor(c.Out, ansiMagenta, msg))
+	fmt.Fprintln(c.Out, applyColor(c.Out, ANSIMagenta, msg))
 }
 
 // Print outputs plain text with no formatting.
