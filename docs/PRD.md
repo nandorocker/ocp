@@ -1173,6 +1173,9 @@ profiles:
 - `machines:` holds per-machine overlays merged over the shared base
   (deep merge for config, additive for skills/plugins/instructions/agents).
   Overlays never nest `hosts`, `machines`, or `extends`.
+- Root `ocp.yaml` accepts `machines:` and `hosts:` too. Root overlays apply to
+  every profile on that machine, with profile overlays merged on top; a root
+  `hosts:` is the default availability, replaced by a profile's own `hosts`.
 - When the machine is named `windy`, OCP automatically appends
   `hosts/windy.md` to each rendered profile's `AGENTS.md` when the file
   exists. No declaration is required.

@@ -110,6 +110,23 @@ machines:
             baseURL: http://127.0.0.1:11434/v1
 ```
 
+Root `ocp.yaml` accepts the same `machines:` and `hosts:` keys. A root `machines.<name>` overlay applies to every profile rendered on that machine (profile-level overlays for the same machine merge on top), so a machine-only MCP server is declared once:
+
+```yaml
+# ocp.yaml
+version: 1
+machines:
+  cosmonaut:
+    config:
+      mcp:
+        servers:
+          playwright:
+            type: local
+            command: [npx, -y, "@playwright/mcp@latest"]
+```
+
+A root `hosts:` list is the default availability for every profile; a profile's own `hosts` replaces it.
+
 A profile with `hosts: [windy]` renders only on Windy; without `hosts` it renders everywhere. When the machine is named `windy`, OCP automatically appends `hosts/windy.md` to that profile's `AGENTS.md` — no declaration needed.
 
 Local skills live under `skills/` (including nested folders such as `skills/apple/`). List paths relative to that folder: `skills: [stop-slop, apple/swiftlint]`. Each profile explicitly lists the skills it uses; folder names do not enable skills automatically. Existing `./skills/...` declarations remain supported. Git-backed skills still use explicit Git URLs.

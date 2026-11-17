@@ -755,3 +755,119 @@ func TestValidMachineName(t *testing.T) {
 		}
 	}
 }
+
+func TestRootMachinesApplyToEveryProfileFile(t *testing.T) {
+	doc, dir := loadWithSourceDir(t, `version: 1
+machines:
+  cosmonaut:
+    config:
+      mcp:
+        servers:
+          playwright:
+            type: local
+    skills: [frontend-design]
+`, func(dir string) {
+		profiles := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profiles, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{
+			"default.yaml": "config:\n  model: a\n",
+			"openai.yaml":  "config:\n  model: b\nmachines:\n  cosmonaut:\n    config:\n      mcp:\n        servers:\n          extra:\n            type: local\n",
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(profiles, name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	cosmonaut, err := doc.ResolveFromDirForMachine(dir, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cosmonaut) != 2 {
+		t.Fatalf("profiles = %#v", cosmonaut)
+	}
+	for _, p := range cosmonaut {
+		servers, _ := p.Config["mcp"].(map[string]any)["servers"].(map[string]any)
+		if _, ok := servers["playwright"]; !ok {
+			t.Errorf("%s missing root overlay playwright: %#v", p.Name, p.Config)
+		}
+		if len(p.Skills) != 1 {
+			t.Errorf("%s skills = %#v", p.Name, p.Skills)
+		}
+		_, hasExtra := servers["extra"]
+		if hasExtra != (p.Name == "openai") {
+			t.Errorf("%s profile overlay merge wrong: %#v", p.Name, servers)
+		}
+	}
+	windy, err := doc.ResolveFromDirForMachine(dir, "windy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range windy {
+		if p.Config["mcp"] != nil || len(p.Skills) != 0 {
+			t.Errorf("%s leaked cosmonaut overlay: %#v", p.Name, p)
+		}
+	}
+}
+
+func TestRootMachinesApplyToImplicitDefault(t *testing.T) {
+	doc := loadText(t, `version: 1
+machines:
+  cosmonaut:
+    config:
+      model: mac
+`)
+	cosmonaut, err := ResolveForMachine(doc, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cosmonaut) != 1 || cosmonaut[0].Name != "default" || cosmonaut[0].Config["model"] != "mac" {
+		t.Fatalf("cosmonaut = %#v", cosmonaut)
+	}
+	windy, err := ResolveForMachine(doc, "windy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windy) != 1 || windy[0].Config["model"] != nil {
+		t.Fatalf("windy = %#v", windy)
+	}
+}
+
+func TestRootHostsRestrictProfilesUnlessOverridden(t *testing.T) {
+	doc := loadText(t, `version: 1
+hosts: [windy]
+profiles:
+  restricted: {}
+  everywhere:
+    hosts: [windy, cosmonaut]
+`)
+	var names []string
+	profiles, err := ResolveForMachine(doc, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range profiles {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "everywhere" {
+		t.Fatalf("cosmonaut profiles = %q", names)
+	}
+}
+
+func TestRootMachinesAndHostsValidation(t *testing.T) {
+	for _, text := range []string{
+		"version: 1\nmachines: []\n",
+		"version: 1\nmachines:\n  mac:\n    hosts: [x]\n",
+		"version: 1\nhosts: [bad name]\n",
+	} {
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("Load(%q) succeeded, want error", text)
+		}
+	}
+}

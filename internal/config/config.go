@@ -17,13 +17,15 @@ const FileName = "ocp.yaml"
 
 // Document is the parsed OCP configuration.
 type Document struct {
-	Version          int                    `yaml:"version"`
-	Config           map[string]any         `yaml:"config,omitempty"`
-	Instructions     []string               `yaml:"instructions,omitempty"`
-	Skills           []Skill                `yaml:"skills,omitempty"`
-	Plugins          []string               `yaml:"plugins,omitempty"`
-	Agents           map[string]Agent       `yaml:"agents,omitempty"`
-	Profiles         map[string]ProfileSpec `yaml:"profiles,omitempty"`
+	Version          int                       `yaml:"version"`
+	Hosts            []string                  `yaml:"hosts,omitempty"`
+	Machines         map[string]MachineOverlay `yaml:"machines,omitempty"`
+	Config           map[string]any            `yaml:"config,omitempty"`
+	Instructions     []string                  `yaml:"instructions,omitempty"`
+	Skills           []Skill                   `yaml:"skills,omitempty"`
+	Plugins          []string                  `yaml:"plugins,omitempty"`
+	Agents           map[string]Agent          `yaml:"agents,omitempty"`
+	Profiles         map[string]ProfileSpec    `yaml:"profiles,omitempty"`
 	profilesDeclared bool
 	SourceDir        string `yaml:"-"` // runtime only, never serialized
 }
@@ -119,10 +121,14 @@ func ResolveForMachine(doc *Document, machine string) ([]Profile, error) {
 		return nil, fmt.Errorf("document is nil")
 	}
 	if !doc.profilesDeclared {
-		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
+		return resolveProfiles(doc, implicitProfiles, machine)
 	}
 	return resolveProfiles(doc, doc.Profiles, machine)
 }
+
+// implicitProfiles is the single empty "default" profile used when a document
+// declares no profiles; it inherits everything from the root document.
+var implicitProfiles = map[string]ProfileSpec{"default": {}}
 
 type composition struct {
 	config       map[string]any
@@ -135,7 +141,7 @@ type composition struct {
 }
 
 func compositionFromDocument(d *Document) composition {
-	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents}
+	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents, hosts: d.Hosts, machines: d.Machines}
 }
 func compositionFromProfile(p ProfileSpec) composition {
 	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines}
@@ -382,7 +388,7 @@ func cloneValue(value any) any {
 }
 
 func parseDocument(node *yaml.Node) (*Document, error) {
-	values, err := mapping(node, "configuration", "version", "config", "instructions", "skills", "plugins", "agents", "profiles")
+	values, err := mapping(node, "configuration", "version", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents", "profiles")
 	if err != nil {
 		return nil, err
 	}
@@ -391,6 +397,12 @@ func parseDocument(node *yaml.Node) (*Document, error) {
 		if err := value.Decode(&doc.Version); err != nil {
 			return nil, fmt.Errorf("version must be an integer")
 		}
+	}
+	if doc.Hosts, err = parseHosts(values["hosts"], "configuration"); err != nil {
+		return nil, err
+	}
+	if doc.Machines, err = parseMachines(values["machines"], "configuration"); err != nil {
+		return nil, err
 	}
 	if doc.Config, err = nativeMap(values["config"], "config"); err != nil {
 		return nil, err
@@ -455,13 +467,8 @@ func parseProfileSpec(node *yaml.Node, label string) (ProfileSpec, error) {
 			return p, fmt.Errorf("%s extends must not be empty", label)
 		}
 	}
-	if p.Hosts, err = stringsList(values["hosts"], label+" hosts"); err != nil {
+	if p.Hosts, err = parseHosts(values["hosts"], label); err != nil {
 		return p, err
-	}
-	for _, host := range p.Hosts {
-		if err := validName("hosts entry", host); err != nil {
-			return p, err
-		}
 	}
 	if p.Machines, err = parseMachines(values["machines"], label); err != nil {
 		return p, err
@@ -482,6 +489,20 @@ func parseProfileSpec(node *yaml.Node, label string) (ProfileSpec, error) {
 		return p, err
 	}
 	return p, nil
+}
+
+// parseHosts parses and validates a hosts availability list.
+func parseHosts(node *yaml.Node, label string) ([]string, error) {
+	hosts, err := stringsList(node, label+" hosts")
+	if err != nil {
+		return nil, err
+	}
+	for _, host := range hosts {
+		if err := validName("hosts entry", host); err != nil {
+			return nil, err
+		}
+	}
+	return hosts, nil
 }
 
 // parseMachines parses the per-machine overlay map. Overlays accept the same
@@ -562,7 +583,7 @@ func (doc *Document) ResolveFromDirForMachine(sourceDir, machine string) ([]Prof
 	}
 
 	if !doc.profilesDeclared {
-		return []Profile{resolved("default", compositionFromDocument(doc))}, nil
+		return resolveProfiles(doc, implicitProfiles, machine)
 	}
 
 	return resolveProfiles(doc, doc.Profiles, machine)
