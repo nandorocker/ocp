@@ -32,8 +32,19 @@ type Lock struct {
 // LockEntry records a source declaration and its immutable Git commit.
 type LockEntry struct {
 	Source string `yaml:"source"`
+	Path   string `yaml:"path,omitempty"`
 	Ref    string `yaml:"ref,omitempty"`
 	Commit string `yaml:"commit"`
+}
+
+// lockKey identifies a skill in the lock. Skills from one repository selected
+// by different subpaths are separate entries and may pin different commits.
+func lockKey(source, path string) string {
+	key := canonicalSource(source)
+	if path != "" {
+		key += "//" + path
+	}
+	return key
 }
 
 // Prepare validates the canonical source lockfile and returns its checkout provider.
@@ -67,7 +78,7 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 	changed := false
 	requested := make(map[string]string, len(gitSkills))
 	for _, skill := range gitSkills {
-		key := canonicalSource(skill.Source)
+		key := lockKey(skill.Source, skill.Path)
 		if ref, duplicate := requested[key]; duplicate && ref != skill.Ref {
 			return nil, false, fmt.Errorf("Git skill %q is declared with conflicting refs", skill.Source)
 		}
@@ -86,7 +97,7 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 		if err != nil {
 			return nil, false, err
 		}
-		lock.Skills[key] = LockEntry{Source: skill.Source, Ref: skill.Ref, Commit: commit}
+		lock.Skills[key] = LockEntry{Source: skill.Source, Path: skill.Path, Ref: skill.Ref, Commit: commit}
 		changed = true
 	}
 	if changed {
@@ -94,7 +105,30 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 			return nil, false, err
 		}
 	}
+	pruneCache(dataDir, lock)
 	return &provider{dataDir: dataDir, entries: lock.Skills}, changed, nil
+}
+
+var cacheDirPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// pruneCache removes cached checkouts that no lock entry references, such as
+// superseded commits and checkouts from the older source-keyed layout. It is
+// best effort and only touches directories named like cache hashes.
+func pruneCache(dataDir string, lock Lock) {
+	keep := make(map[string]bool, len(lock.Skills))
+	for _, entry := range lock.Skills {
+		keep[filepath.Base(filepath.Dir(cachePath(dataDir, canonicalSource(entry.Source), entry.Commit)))] = true
+	}
+	root := filepath.Join(dataDir, "skills")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() && cacheDirPattern.MatchString(e.Name()) && !keep[e.Name()] {
+			_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		}
+	}
 }
 
 func readLock(filename string) (Lock, bool, error) {
@@ -118,11 +152,24 @@ func readLock(filename string) (Lock, bool, error) {
 		lock.Skills = map[string]LockEntry{}
 	}
 	for key, entry := range lock.Skills {
-		if key == "" || entry.Source == "" || canonicalSource(entry.Source) != key || !commitPattern.MatchString(entry.Commit) {
+		if key == "" || entry.Source == "" || lockKey(entry.Source, entry.Path) != key || !commitPattern.MatchString(entry.Commit) || !validLockPath(entry) {
 			return Lock{}, false, fmt.Errorf("invalid skill lock %s: invalid entry %q", filename, key)
 		}
 	}
 	return lock, true, nil
+}
+
+// validLockPath rejects a hand-edited or hostile entry whose source embeds a
+// subpath separator or whose path is not already in canonical, in-repo form.
+func validLockPath(entry LockEntry) bool {
+	if _, _, embedded := config.SplitSubpath(entry.Source); embedded {
+		return false
+	}
+	if entry.Path == "" {
+		return true
+	}
+	clean, err := config.CleanSkillPath(entry.Path)
+	return err == nil && clean == entry.Path
 }
 
 func writeLock(filename string, lock Lock) error {
@@ -160,14 +207,28 @@ type provider struct {
 	entries map[string]LockEntry
 }
 
-// SkillDir materializes the requested immutable checkout on demand.
+// SkillDir materializes the requested immutable checkout on demand and returns
+// the skill directory: the repository root, or the selected subpath inside it.
 func (p *provider) SkillDir(skill config.Skill) (string, error) {
-	key := canonicalSource(skill.Source)
+	key := lockKey(skill.Source, skill.Path)
 	entry, ok := p.entries[key]
-	if !ok || entry.Ref != skill.Ref {
+	if !ok || entry.Ref != skill.Ref || entry.Path != skill.Path {
 		return "", fmt.Errorf("Git skill %q is not locked for ref %q", skill.Source, skill.Ref)
 	}
-	dest := cachePath(p.dataDir, key)
+	dest, err := p.checkout(entry)
+	if err != nil {
+		return "", err
+	}
+	if entry.Path == "" {
+		return dest, nil
+	}
+	return subpathDir(dest, entry)
+}
+
+// checkout returns a checkout of the entry's commit. The cache is keyed by
+// commit, so skills from one repository at different commits never collide.
+func (p *provider) checkout(entry LockEntry) (string, error) {
+	dest := cachePath(p.dataDir, canonicalSource(entry.Source), entry.Commit)
 	if checkoutAt(dest, entry.Commit) {
 		return dest, nil
 	}
@@ -201,6 +262,34 @@ func (p *provider) SkillDir(skill config.Skill) (string, error) {
 		return "", err
 	}
 	return dest, nil
+}
+
+// subpathDir resolves the entry's subpath inside a checkout. It rejects
+// symlinked components and anything that is not a directory holding SKILL.md,
+// so a hostile repository cannot point a skill outside its own tree.
+func subpathDir(root string, entry LockEntry) (string, error) {
+	dir := root
+	for _, part := range strings.Split(entry.Path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("Git skill %q: invalid path %q", entry.Source, entry.Path)
+		}
+		dir = filepath.Join(dir, part)
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return "", fmt.Errorf("Git skill %q: path %q: %w", entry.Source, entry.Path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("Git skill %q: path %q must not contain symlinks", entry.Source, entry.Path)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("Git skill %q: path %q is not a directory", entry.Source, entry.Path)
+		}
+	}
+	info, err := os.Lstat(filepath.Join(dir, "SKILL.md"))
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("Git skill %q: path %q has no SKILL.md", entry.Source, entry.Path)
+	}
+	return dir, nil
 }
 
 func resolve(source, ref string) (string, error) {
@@ -267,8 +356,8 @@ func canonicalSource(source string) string {
 	return strings.TrimSuffix(source, ".git")
 }
 
-func cachePath(dataDir, source string) string {
-	sum := sha256.Sum256([]byte(source))
+func cachePath(dataDir, source, commit string) string {
+	sum := sha256.Sum256([]byte(source + "\x00" + commit))
 	name := repositoryName(source)
 	if name == "." || name == "/" || name == "" {
 		name = "skill"

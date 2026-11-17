@@ -345,13 +345,30 @@ The suffix after `@` is a Git ref and may represent:
 - branch
 - commit
 
-Expanded syntax is supported when shorthand becomes ambiguous:
+GitHub shorthand expands to the HTTPS URL:
+
+```yaml
+skills:
+  - github:example/debugging@v1.4.0
+```
+
+A repository that holds several skills can be addressed with a subpath, separated by `//` after the URL (the first `//` after the scheme):
+
+```yaml
+skills:
+  - github:example/collection//skills/pdf@v1.4.0
+```
+
+Expanded syntax is supported when shorthand becomes ambiguous, and is the only way to pin a ref on `ssh://` and `git@` URLs:
 
 ```yaml
 skills:
   - git: git@myserver:team/debugging.git
+    path: tracing        # optional subdirectory
     ref: main
 ```
+
+A subpath is relative, is cleaned, and cannot escape the repository or traverse symlinks. It must be a directory containing `SKILL.md`. The skill is named after its last path segment. Each (source, path) pair has its own `ocp.lock` entry (`path` is recorded when set), so skills from one repository may pin different refs.
 
 OCP should prefer explicit syntax over guessing.
 
@@ -366,8 +383,8 @@ MVP parsing rules:
 - bare name or nested path → local path under `skills/`
 - `./skills/...` → legacy explicit local path under `skills/`
 - absolute or escaping local path → error
-- explicit HTTP(S) Git URL → Git-backed skill
-- expanded `git:` form → Git-backed skill
+- explicit HTTP(S), `ssh://` or `git@` Git URL, or `github:owner/repo` → Git-backed skill, with optional `//subpath` and `@ref`
+- expanded `git:` form (with optional `path` and `ref`) → Git-backed skill
 
 OCP should not infer Git sources from arbitrary bare strings.
 

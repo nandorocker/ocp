@@ -606,8 +606,8 @@ func gitSkills(source string) ([]config.Skill, error) {
 	var out []config.Skill
 	for _, p := range ps {
 		for _, s := range p.Skills {
-			if strings.HasPrefix(s.Source, "http://") || strings.HasPrefix(s.Source, "https://") || strings.HasPrefix(s.Source, "git@") || strings.HasPrefix(s.Source, "ssh://") {
-				k := s.Source + "\x00" + s.Ref
+			if s.IsGit() {
+				k := s.Source + "\x00" + s.Path + "\x00" + s.Ref
 				if !seen[k] {
 					seen[k] = true
 					out = append(out, s)

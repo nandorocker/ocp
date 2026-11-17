@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -52,20 +53,31 @@ type MachineOverlay struct {
 	Agents       map[string]Agent `yaml:"agents,omitempty"`
 }
 
-// Skill identifies a local or Git-backed skill source. Ref is optional.
+// Skill identifies a local or Git-backed skill source. Ref is optional. Path
+// optionally selects a subdirectory of a Git repository; it is always a clean,
+// relative, slash-separated path and is empty for local skills.
 type Skill struct {
 	Source string
 	Ref    string
+	Path   string
 }
 
 func (s Skill) MarshalYAML() (any, error) {
-	if s.Ref == "" {
+	if s.Ref == "" && s.Path == "" {
 		return s.Source, nil
 	}
 	return struct {
-		Git string `yaml:"git"`
-		Ref string `yaml:"ref"`
-	}{Git: s.Source, Ref: s.Ref}, nil
+		Git  string `yaml:"git"`
+		Path string `yaml:"path,omitempty"`
+		Ref  string `yaml:"ref,omitempty"`
+	}{Git: s.Source, Path: s.Path, Ref: s.Ref}, nil
+}
+
+// IsGit reports whether the skill is fetched from a Git repository.
+func (s Skill) IsGit() bool { return isGitURL(s.Source) }
+
+func isGitURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "git@") || strings.HasPrefix(s, "ssh://")
 }
 
 // Agent is an agent source file and its native OpenCode configuration.
@@ -281,26 +293,37 @@ func mergeSkills(base, child []Skill) []Skill {
 	byDeclaration, bySource := make(map[string]int), make(map[string]int)
 	for i, skill := range out {
 		byDeclaration[skill.declaration()] = i
-		bySource[skillSourceIdentity(skill.Source)] = i
+		bySource[skill.identity()] = i
 	}
 	for _, skill := range child {
 		if _, ok := byDeclaration[skill.declaration()]; ok {
 			continue
 		}
-		if i, ok := bySource[skillSourceIdentity(skill.Source)]; ok {
+		if i, ok := bySource[skill.identity()]; ok {
 			delete(byDeclaration, out[i].declaration())
 			out[i] = skill
 			byDeclaration[skill.declaration()] = i
 			continue
 		}
 		byDeclaration[skill.declaration()] = len(out)
-		bySource[skillSourceIdentity(skill.Source)] = len(out)
+		bySource[skill.identity()] = len(out)
 		out = append(out, skill)
 	}
 	return out
 }
 
-func (s Skill) declaration() string { return skillSourceIdentity(s.Source) + "\x00" + s.Ref }
+func (s Skill) declaration() string { return s.identity() + "\x00" + s.Ref }
+
+// identity names the skill independent of its ref, so a later declaration of
+// the same skill at another ref replaces the earlier one. Skills from the same
+// repository but different subpaths are distinct.
+func (s Skill) identity() string {
+	id := skillSourceIdentity(s.Source)
+	if s.Path != "" {
+		id += "//" + s.Path
+	}
+	return id
+}
 
 func skillSourceIdentity(source string) string {
 	if strings.HasPrefix(source, "./skills/") {
@@ -842,13 +865,13 @@ func skills(node *yaml.Node) ([]Skill, error) {
 			if item.Tag != "!!str" {
 				return nil, fmt.Errorf("skill must be a string or mapping")
 			}
-			source, ref := splitRef(item.Value)
-			if source == "" {
-				return nil, fmt.Errorf("skill source must not be empty")
+			skill, err := parseSkillScalar(item.Value)
+			if err != nil {
+				return nil, err
 			}
-			out = append(out, Skill{source, ref})
+			out = append(out, skill)
 		case yaml.MappingNode:
-			values, err := mapping(item, "skill", "git", "ref")
+			values, err := mapping(item, "skill", "git", "path", "ref")
 			if err != nil {
 				return nil, err
 			}
@@ -856,19 +879,122 @@ func skills(node *yaml.Node) ([]Skill, error) {
 			if git == nil || git.Tag != "!!str" || git.Value == "" {
 				return nil, fmt.Errorf("skill git must be a non-empty string")
 			}
-			var ref string
+			source, err := expandGitHub(git.Value)
+			if err != nil {
+				return nil, err
+			}
+			if _, _, hasSub := SplitSubpath(source); hasSub {
+				return nil, fmt.Errorf("skill git %q must not contain //; use the path key for a subpath", git.Value)
+			}
+			skill := Skill{Source: source}
 			if v := values["ref"]; v != nil {
 				if v.Tag != "!!str" {
 					return nil, fmt.Errorf("skill ref must be a string")
 				}
-				ref = v.Value
+				skill.Ref = v.Value
 			}
-			out = append(out, Skill{git.Value, ref})
+			if v := values["path"]; v != nil {
+				if v.Tag != "!!str" {
+					return nil, fmt.Errorf("skill path must be a string")
+				}
+				if skill.Path, err = CleanSkillPath(v.Value); err != nil {
+					return nil, err
+				}
+			}
+			if skill.Path != "" && !skill.IsGit() {
+				return nil, fmt.Errorf("skill path requires a Git source")
+			}
+			out = append(out, skill)
 		default:
 			return nil, fmt.Errorf("skill must be a string or mapping")
 		}
 	}
 	return out, nil
+}
+
+// parseSkillScalar parses a skill list entry. A Git entry is
+// `<url>[//<subpath>][@<ref>]`, where the `//` separator is the first one after
+// the URL scheme. `github:owner/repo` expands to the full GitHub HTTPS URL.
+// Anything else is a local skill name or path, left for render-time validation.
+func parseSkillScalar(value string) (Skill, error) {
+	value, err := expandGitHub(value)
+	if err != nil {
+		return Skill{}, err
+	}
+	if !isGitURL(value) {
+		if value == "" {
+			return Skill{}, fmt.Errorf("skill source must not be empty")
+		}
+		return Skill{Source: value}, nil
+	}
+	source, ref := splitRef(value)
+	if strings.Contains(ref, "//") {
+		return Skill{}, fmt.Errorf("skill %q: put the //subpath before the @ref", value)
+	}
+	source, sub, hasSub := SplitSubpath(source)
+	if source == "" {
+		return Skill{}, fmt.Errorf("skill source must not be empty")
+	}
+	if hasSub && strings.Contains(sub, "@") && !strings.HasPrefix(source, "http") {
+		return Skill{}, fmt.Errorf("skill %q: refs on ssh and git@ URLs need the expanded form (git:, path:, ref:)", value)
+	}
+	skill := Skill{Source: source, Ref: ref}
+	if hasSub {
+		if skill.Path, err = CleanSkillPath(sub); err != nil {
+			return Skill{}, err
+		}
+	}
+	return skill, nil
+}
+
+// expandGitHub rewrites the `github:owner/repo` shorthand, keeping any
+// subpath and ref suffix, to the full HTTPS URL. Other values are unchanged.
+func expandGitHub(value string) (string, error) {
+	rest, ok := strings.CutPrefix(value, "github:")
+	if !ok {
+		return value, nil
+	}
+	repo, _, _ := strings.Cut(rest, "//")
+	if at := strings.LastIndex(repo, "@"); at >= 0 {
+		repo = repo[:at]
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return "", fmt.Errorf("skill %q: github shorthand must be github:owner/repo", value)
+	}
+	return "https://github.com/" + rest, nil
+}
+
+// SplitSubpath splits `<url>//<subpath>`, searching for the separator after the
+// scheme so the `//` of `https://` is never mistaken for it.
+func SplitSubpath(source string) (string, string, bool) {
+	start := 0
+	if i := strings.Index(source, "://"); i >= 0 {
+		start = i + 3
+	}
+	j := strings.Index(source[start:], "//")
+	if j < 0 {
+		return source, "", false
+	}
+	return source[:start+j], source[start+j+2:], true
+}
+
+// CleanSkillPath validates a repository subpath and returns it in canonical
+// form. It must stay inside the repository.
+func CleanSkillPath(p string) (string, error) {
+	if p == "" || strings.Contains(p, "\\") || strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("skill path %q must be a relative path inside the repository", p)
+	}
+	clean := path.Clean(p)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("skill path %q must be a relative path inside the repository", p)
+	}
+	for _, part := range strings.Split(clean, "/") {
+		if part == ".git" {
+			return "", fmt.Errorf("skill path %q must not contain .git", p)
+		}
+	}
+	return clean, nil
 }
 
 func splitRef(source string) (string, string) {
