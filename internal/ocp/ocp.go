@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -375,7 +376,94 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 			return nil, err
 		}
 	}
+	if err := renderFiles(dest, source, p.FilesDirs); err != nil {
+		return nil, err
+	}
 	return nil, writeManifest(dest)
+}
+
+// reservedOutputs are top-level names produced by the renderer itself; extra
+// files may not shadow them.
+var reservedOutputs = []string{"opencode.json", "AGENTS.md", "agents", "skills"}
+
+// renderFiles copies extra files from each source-relative directory into the
+// profile root. Directories are ordered base to child, so later ones win per
+// path. All inputs are validated before anything is written.
+func renderFiles(dest, source string, dirs []string) error {
+	files := map[string]string{} // slash-separated relative destination -> source path
+	for _, dir := range dirs {
+		root := filepath.Join(source, dir)
+		if err := sourcePathSafe(source, root); err != nil {
+			return fmt.Errorf("files %q: %w", dir, err)
+		}
+		info, err := os.Lstat(root)
+		if err != nil {
+			return fmt.Errorf("files %q: %w", dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("files %q must be a directory", dir)
+		}
+		err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if path == root || d.IsDir() {
+				return nil
+			}
+			if err := sourcePathSafe(source, path); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			if !d.Type().IsRegular() {
+				return fmt.Errorf("%s: only regular files are allowed", path)
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if err := checkExtraFile(rel); err != nil {
+				return fmt.Errorf("files %q: %w", dir, err)
+			}
+			files[rel] = path
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	for rel := range files {
+		for i, c := range rel {
+			if c != '/' {
+				continue
+			}
+			if _, clash := files[rel[:i]]; clash {
+				return fmt.Errorf("extra file %q conflicts with file %q", rel, rel[:i])
+			}
+		}
+	}
+	for rel, src := range files {
+		b, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		if err := atomicFile(filepath.Join(dest, filepath.FromSlash(rel)), b, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkExtraFile(rel string) error {
+	top := strings.SplitN(rel, "/", 2)[0]
+	for _, name := range reservedOutputs {
+		if top == name {
+			return fmt.Errorf("extra file %q collides with generated output %q", rel, name)
+		}
+	}
+	if path.Base(rel) == manifestName {
+		return fmt.Errorf("extra file %q collides with %s", rel, manifestName)
+	}
+	return nil
 }
 
 // localSourcePath resolves a repository-local declaration inside its standard
