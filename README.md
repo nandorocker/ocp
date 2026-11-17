@@ -140,7 +140,20 @@ A root `hosts:` list is the default availability for every profile; a profile's 
 
 A profile with `hosts: [windy]` renders only on Windy; without `hosts` it renders everywhere. When the machine is named `windy`, OCP automatically appends `hosts/windy.md` to that profile's `AGENTS.md` — no declaration needed.
 
-Local skills live under `skills/` (including nested folders such as `skills/apple/`). List paths relative to that folder: `skills: [stop-slop, apple/swiftlint]`. Each profile explicitly lists the skills it uses; folder names do not enable skills automatically. Existing `./skills/...` declarations remain supported. Git-backed skills still use explicit Git URLs.
+Local skills live under `skills/` (including nested folders such as `skills/apple/`). List paths relative to that folder: `skills: [stop-slop, apple/swiftlint]`. Each profile explicitly lists the skills it uses; folder names do not enable skills automatically. Existing `./skills/...` declarations remain supported. Git-backed skills use a Git URL (`https://`, `ssh://` or `git@host:path`, any host) or the `github:owner/repo` shorthand. Append `//<subpath>` to take one skill folder from a repository that holds many, and `@<ref>` to pin a tag, branch or commit:
+
+```yaml
+skills:
+  - stop-slop                                    # local: skills/stop-slop
+  - github:anthropics/skills//skills/pdf         # one folder of a repo
+  - github:anthropics/skills//skills/docx@v1.2   # pinned
+  - https://gitlab.com/team/skills@v2            # whole repo is the skill
+  - git: git@myserver:team/skills.git            # expanded form, any URL
+    path: debugging/tracing
+    ref: main
+```
+
+The subpath must stay inside the repository, must not pass through symlinks, and must contain `SKILL.md`. Each skill is locked separately in `ocp.lock`, and the skill is named after its last path segment. The `@ref` suffix works on `https://` and `github:` entries; use the expanded form for a ref on `ssh://` or `git@` URLs. Once `ocp.lock` contains a `path`, every machine syncing that source needs an `ocp` build that supports subpaths; older builds reject the lock. Cached checkouts that the lock no longer references are removed automatically.
 
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 

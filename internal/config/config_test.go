@@ -871,3 +871,99 @@ func TestRootMachinesAndHostsValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillSubpathAndGitHubShorthand(t *testing.T) {
+	profiles, err := Resolve(loadText(t, `version: 1
+skills:
+  - github:anthropics/skills//skills/pdf
+  - github:anthropics/skills//skills/docx@v1.2
+  - github:org/whole@main
+  - https://gitlab.com/team/skills//a/b/../c@v2
+  - git@myserver:team/skills.git//debugging
+  - ssh://git@host:2222/team/skills.git//x
+  - git: github:org/mapped
+    path: ./tools/lint
+    ref: dev
+  - stop-slop
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Skill{
+		{Source: "https://github.com/anthropics/skills", Path: "skills/pdf"},
+		{Source: "https://github.com/anthropics/skills", Path: "skills/docx", Ref: "v1.2"},
+		{Source: "https://github.com/org/whole", Ref: "main"},
+		{Source: "https://gitlab.com/team/skills", Path: "a/c", Ref: "v2"},
+		{Source: "git@myserver:team/skills.git", Path: "debugging"},
+		{Source: "ssh://git@host:2222/team/skills.git", Path: "x"},
+		{Source: "https://github.com/org/mapped", Path: "tools/lint", Ref: "dev"},
+		{Source: "stop-slop"},
+	}
+	got := profiles[0].Skills
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("skills = %#v\nwant %#v", got, want)
+	}
+}
+
+func TestSkillSubpathsFromOneRepoStayDistinctAndRefOverrides(t *testing.T) {
+	profiles, err := Resolve(loadText(t, `version: 1
+skills:
+  - github:org/repo//a@v1
+  - github:org/repo//b@v1
+profiles:
+  deep:
+    skills:
+      - github:org/repo//a@v2
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Skill{
+		{Source: "https://github.com/org/repo", Path: "a", Ref: "v2"},
+		{Source: "https://github.com/org/repo", Path: "b", Ref: "v1"},
+	}
+	if got := profiles[0].Skills; !reflect.DeepEqual(got, want) {
+		t.Fatalf("skills = %#v, want %#v", got, want)
+	}
+}
+
+func TestSkillInvalidSubpathsRejected(t *testing.T) {
+	for _, entry := range []string{
+		"github:org/repo//../escape",
+		"github:org/repo//..",
+		"github:org/repo//.",
+		"github:org/repo//",
+		"github:org/repo///abs",
+		"github:org/repo//a/.git/b",
+		"https://h/r@v1//sub",
+		"git@h:r//sub@v1",
+		"github:",
+		"github:owner",
+		"github:owner/repo/extra",
+		"github:https://example.com/x",
+		"git: github:o/r//skills/pdf",
+		"\"git: github:org/repo\\n    path: /abs\"",
+	} {
+		text := "version: 1\nskills:\n  - " + entry + "\n"
+		if strings.HasPrefix(entry, "git: ") {
+			text = "version: 1\nskills:\n  - " + entry + "\n"
+		}
+		if strings.HasPrefix(entry, "\"") {
+			text = "version: 1\nskills:\n  - git: github:org/repo\n    path: /abs\n"
+		}
+		file := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(file); err == nil {
+			t.Errorf("%q was accepted", entry)
+		}
+	}
+	file := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(file, []byte("version: 1\nskills:\n  - git: local-name\n    path: sub\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(file); err == nil {
+		t.Error("path with a non-Git source was accepted")
+	}
+}

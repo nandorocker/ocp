@@ -137,3 +137,134 @@ func gitMust(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func collectionRepository(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	work, bare := filepath.Join(root, "work"), filepath.Join(root, "coll.git")
+	gitRun(t, root, "init", "-b", "main", work)
+	for _, name := range []string{"skills/pdf/SKILL.md", "skills/docx/SKILL.md", "skills/nomd/README.md"} {
+		file := filepath.Join(work, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("skills/pdf", filepath.Join(work, "link")); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, work, "add", ".")
+	gitRun(t, work, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-m", "skills")
+	commit := gitMust(t, work, "rev-parse", "HEAD")
+	gitRun(t, root, "init", "--bare", bare)
+	gitRun(t, work, "remote", "add", "origin", bare)
+	gitRun(t, work, "push", "origin", "main")
+	return bare, commit
+}
+
+func TestSubpathSkillsLockPerPathAndShareCheckout(t *testing.T) {
+	repo, commit := collectionRepository(t)
+	source, data := t.TempDir(), t.TempDir()
+	pdf := config.Skill{Source: repo, Path: "skills/pdf", Ref: "main"}
+	docx := config.Skill{Source: repo, Path: "skills/docx", Ref: "main"}
+	p, changed, err := prepare(source, data, []config.Skill{pdf, docx}, true, func(string) bool { return true })
+	if err != nil || !changed {
+		t.Fatalf("bootstrap = %v, changed %v", err, changed)
+	}
+	lock, _, err := readLock(filepath.Join(source, lockFileName))
+	if err != nil || len(lock.Skills) != 2 || lock.Skills[lockKey(repo, "skills/pdf")].Commit != commit || lock.Skills[lockKey(repo, "skills/docx")].Path != "skills/docx" {
+		t.Fatalf("lock = %#v, err %v", lock, err)
+	}
+	pdfDir, err := p.SkillDir(pdf)
+	if err != nil || filepath.Base(pdfDir) != "pdf" {
+		t.Fatalf("pdf dir = %q, %v", pdfDir, err)
+	}
+	docxDir, err := p.SkillDir(docx)
+	if err != nil || filepath.Dir(docxDir) != filepath.Dir(pdfDir) {
+		t.Fatalf("docx dir = %q, %v; want sibling of %q", docxDir, err, pdfDir)
+	}
+	// A second prepare reuses the lock without needing the network or changing it.
+	if _, changed, err := prepare(source, data, []config.Skill{pdf, docx}, false, func(string) bool { return true }); err != nil || changed {
+		t.Fatalf("reprepare = %v, changed %v", err, changed)
+	}
+}
+
+func TestSubpathSkillRejectsMissingSymlinkAndNoSkillMD(t *testing.T) {
+	repo, _ := collectionRepository(t)
+	for _, path := range []string{"skills/missing", "link", "skills/nomd", "skills/pdf/SKILL.md"} {
+		skill := config.Skill{Source: repo, Path: path, Ref: "main"}
+		p, _, err := prepare(t.TempDir(), t.TempDir(), []config.Skill{skill}, true, func(string) bool { return true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir, err := p.SkillDir(skill); err == nil {
+			t.Errorf("path %q accepted, dir %q", path, dir)
+		}
+	}
+}
+
+func TestReadLockKeyMustMatchSourceAndPath(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	file := filepath.Join(t.TempDir(), "ocp.lock")
+	text := "version: 1\nskills:\n  https://example.test/a:\n    source: https://example.test/a\n    path: sub\n    commit: " + commit + "\n"
+	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readLock(file); err == nil {
+		t.Fatal("lock key without path accepted for entry with path")
+	}
+}
+
+func TestReadLockRejectsEscapingOrEmbeddedPaths(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	for name, text := range map[string]string{
+		"dotdot":   "https://example.test/a//../x:\n    source: https://example.test/a\n    path: ../x\n",
+		"unclean":  "https://example.test/a//x/./y:\n    source: https://example.test/a\n    path: x/./y\n",
+		"embedded": "https://example.test/a//../x:\n    source: https://example.test/a//../x\n",
+	} {
+		file := filepath.Join(t.TempDir(), "ocp.lock")
+		body := "version: 1\nskills:\n  " + text + "    commit: " + commit + "\n"
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readLock(file); err == nil {
+			t.Errorf("%s lock entry accepted", name)
+		}
+	}
+}
+
+func TestPruneCacheRemovesUnreferencedCheckoutsOnly(t *testing.T) {
+	repo, commit := bareRepository(t)
+	source, data := t.TempDir(), t.TempDir()
+	stale := filepath.Join(data, "skills", "0123456789abcdef", "old")
+	other := filepath.Join(data, "skills", "not-a-cache-dir")
+	for _, dir := range []string{stale, other} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skill := config.Skill{Source: repo, Ref: "main"}
+	p, _, err := prepare(source, data, []config.Skill{skill}, true, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := p.SkillDir(skill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := prepare(source, data, []config.Skill{skill}, false, func(string) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale checkout survived: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("non-cache directory removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(kept, "SKILL.md")); err != nil {
+		t.Errorf("referenced checkout removed: %v", err)
+	}
+	_ = commit
+}
