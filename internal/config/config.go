@@ -40,6 +40,10 @@ type ProfileSpec struct {
 	Skills       []Skill                   `yaml:"skills,omitempty"`
 	Plugins      []string                  `yaml:"plugins,omitempty"`
 	Agents       map[string]Agent          `yaml:"agents,omitempty"`
+	// FilesDirs lists source-relative directories whose contents are copied
+	// into the rendered profile root. Runtime only; discovered from
+	// profiles/<name>/files/ and never read from YAML.
+	FilesDirs []string `yaml:"-"`
 }
 
 // MachineOverlay holds per-machine overrides applied on top of a profile's
@@ -84,6 +88,10 @@ type Profile struct {
 	Agents       map[string]Agent
 	Hosts        []string
 	Machines     map[string]MachineOverlay
+	// FilesDirs are source-relative directories of extra files, ordered from
+	// the most distant ancestor to the profile itself; later directories win
+	// per path.
+	FilesDirs []string
 }
 
 // Load parses and validates an OCP document from path.
@@ -138,22 +146,23 @@ type composition struct {
 	agents       map[string]Agent
 	hosts        []string
 	machines     map[string]MachineOverlay
+	filesDirs    []string
 }
 
 func compositionFromDocument(d *Document) composition {
 	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents, hosts: d.Hosts, machines: d.Machines}
 }
 func compositionFromProfile(p ProfileSpec) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs}
 }
 func compositionFromResolved(p Profile) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs}
 }
 func compositionFromOverlay(o MachineOverlay) composition {
-	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil}
+	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil, nil}
 }
 func resolved(name string, c composition) Profile {
-	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines)}
+	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...)}
 }
 
 func mergeComposition(base, child composition) composition {
@@ -169,6 +178,7 @@ func mergeComposition(base, child composition) composition {
 		agents:       mergeAgents(base.agents, child.agents),
 		hosts:        append([]string(nil), hosts...),
 		machines:     mergeMachines(base.machines, child.machines),
+		filesDirs:    appendUnique(base.filesDirs, child.filesDirs),
 	}
 }
 
@@ -599,7 +609,7 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 	profileFiles := make(map[string]string)
 	for _, e := range entries {
 		entryName := e.Name()
-		base, filePath, guidePath := "", "", ""
+		base, filePath, guidePath, filesRel := "", "", "", ""
 		displayName := entryName
 		if e.Type()&os.ModeSymlink != 0 {
 			if strings.HasSuffix(entryName, ".yaml") || strings.HasSuffix(entryName, ".yml") {
@@ -615,6 +625,7 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 			filePath = filepath.Join(profilesDir, entryName, "profile.yaml")
 			displayName = filePath
 			guidePath = filepath.Join("profiles", entryName, "guide.md")
+			filesRel = filepath.Join("profiles", entryName, "files")
 		} else {
 			ext := filepath.Ext(entryName)
 			if ext != ".yaml" && ext != ".yml" {
@@ -659,6 +670,13 @@ func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
 				spec.Instructions = append([]string{guidePath}, spec.Instructions...)
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return nil, fmt.Errorf("inspect profile guide %q: %w", guidePath, err)
+			}
+		}
+		if filesRel != "" {
+			if _, err := os.Lstat(filepath.Join(profilesDir, entryName, "files")); err == nil {
+				spec.FilesDirs = []string{filesRel}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("inspect profile files %q: %w", filesRel, err)
 			}
 		}
 		result[base] = spec
@@ -771,6 +789,7 @@ func cloneProfileSpec(ps ProfileSpec) ProfileSpec {
 		Skills:       append([]Skill(nil), ps.Skills...),
 		Plugins:      append([]string(nil), ps.Plugins...),
 		Agents:       cloneAgents(ps.Agents),
+		FilesDirs:    append([]string(nil), ps.FilesDirs...),
 	}
 }
 

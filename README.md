@@ -93,6 +93,17 @@ agents:
 
 An optional `profiles/deep/guide.md` is included in that profile's generated `AGENTS.md`. Agent and instruction paths in profile YAML are relative to the OCP source root; skill and plugin references use their own standard folders.
 
+### Extra files
+
+Anything under `profiles/<name>/files/` is copied into the rendered profile root, so tools and plugins that read their own files from the OpenCode config directory can be managed by a profile. For example, `profiles/deep/files/my-plugin.jsonc` renders to `~/.config/opencode/my-plugin.jsonc`, and `files/conf/a.json` renders to `conf/a.json`.
+
+- Extra files are covered by drift detection like any other generated file; edit the source and run `ocp apply` instead of editing the rendered copy.
+- With `extends`, the parent's files are rendered first and the child's files win per path.
+- Files render with mode `0600`. Symlinks and non-regular files are rejected.
+- Names that collide with generated output (`opencode.json`, `AGENTS.md`, `agents/`, `skills/`) are rejected.
+- Rendered releases are immutable, so state a tool writes next to its config file is per release and is not carried over by `ocp apply`.
+- `machines:` overlays cannot add files; `files/` applies on every machine that gets the profile.
+
 During `ocp setup`, OCP asks for this machine's name (defaulting to the hostname, overridable with `--machine`). The name is stored in local state and drives machine-aware rendering:
 
 ```yaml
