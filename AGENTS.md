@@ -12,6 +12,16 @@ go test ./...       # all tests; no special setup
 
 No CI, no linter — `go vet ./...` is sufficient before shipping changes.
 
+## CLI output design: live preview
+
+Whenever a task changes how OCP prints (colors, effects, layout, tables, trees, new command output, `internal/color`), **first tell the user to start the live preview in a spare terminal**, then iterate on it with them:
+
+```bash
+make preview                         # or: tools/preview/watch.sh [scenario ...]
+```
+
+It re-renders on every file save, so they never re-run a command, like a browser preview. Tune styles in `tools/preview/theme.go`, layout in `render.go`, and fixtures in `data.go`; remind the user the preview is running whenever you edit those files. Only once the look is agreed, promote it into `internal/color` and `internal/cli` (steps in `tools/preview/README.md`). The preview is its own Go module and is excluded from `go test ./...`.
+
 ## Architecture
 
 Single Go binary (`github.com/nando/ocp`). One entry point:
@@ -32,7 +42,7 @@ Packages (all `internal/`):
 | `importer` | Best-effort import from OpenCode and OPM configurations |
 | `color` | Semantic terminal coloring wrapper |
 
-CLI uses stdlib `flag` — not cobra/spf13. Command surface is flat: `setup, sync, apply, use, run, list, status, import, upgrade(deferred), reset`.
+CLI uses stdlib `flag` — not cobra/spf13. Command surface is flat: `setup, sync, apply, use, run, list, status, show, import, upgrade(deferred), reset`.
 
 ## Conventions
 

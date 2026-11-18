@@ -589,6 +589,17 @@ func (doc *Document) ResolveFromDir(sourceDir string) ([]Profile, error) {
 // ResolveFromDirForMachine resolves profiles for a machine, applying host
 // availability filtering and per-machine overlays.
 func (doc *Document) ResolveFromDirForMachine(sourceDir, machine string) ([]Profile, error) {
+	specs, err := doc.profileSpecs(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	return resolveProfiles(doc, specs, machine)
+}
+
+// profileSpecs returns the unresolved profile declarations for a source:
+// profile files or directories when the profiles directory has them,
+// otherwise the inline profiles from ocp.yaml (or the implicit default).
+func (doc *Document) profileSpecs(sourceDir string) (map[string]ProfileSpec, error) {
 	doc.SourceDir = sourceDir
 
 	profilesDir := filepath.Join(sourceDir, "profiles")
@@ -605,21 +616,16 @@ func (doc *Document) ResolveFromDirForMachine(sourceDir, machine string) ([]Prof
 			if doc.profilesDeclared {
 				return nil, errors.New("inline profiles and profiles directory cannot be used together")
 			}
-			fileProfiles, err := loadFileProfiles(profilesDir)
-			if err != nil {
-				return nil, err
-			}
-			return resolveProfiles(doc, fileProfiles, machine)
+			return loadFileProfiles(profilesDir)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read profiles directory: %w", err)
 	}
 
 	if !doc.profilesDeclared {
-		return resolveProfiles(doc, implicitProfiles, machine)
+		return implicitProfiles, nil
 	}
-
-	return resolveProfiles(doc, doc.Profiles, machine)
+	return doc.Profiles, nil
 }
 
 func loadFileProfiles(profilesDir string) (map[string]ProfileSpec, error) {
@@ -1016,10 +1022,19 @@ func CleanSkillPath(p string) (string, error) {
 	return clean, nil
 }
 
+// splitRef splits a trailing @ref from an http(s) source. The ref can only be
+// in the path: an "@" in the authority is userinfo (user:token@host), which
+// belongs to the URL.
 func splitRef(source string) (string, string) {
 	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
-		if at := strings.LastIndex(source, "@"); at > strings.Index(source, "://")+2 {
-			return source[:at], source[at+1:]
+		pathStart := strings.Index(source, "://") + 3
+		slash := strings.Index(source[pathStart:], "/")
+		if slash < 0 {
+			return source, ""
+		}
+		pathStart += slash
+		if at := strings.LastIndex(source[pathStart:], "@"); at > 0 {
+			return source[:pathStart+at], source[pathStart+at+1:]
 		}
 	}
 	return source, ""

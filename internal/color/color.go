@@ -19,9 +19,19 @@ const (
 	ANSIDim     = "\033[2m"
 	ANSIMagenta = "\033[35m"
 	ANSICyan    = "\033[36m"
+
+	// Styles used by structured views such as `ocp show`. Basic ANSI only, so
+	// they follow the terminal theme.
+	ANSIRed         = ansiRed
+	ANSIBlue        = "\033[34m"
+	ANSIBold        = "\033[1m"
+	ANSIBoldDim     = "\033[1;2m"
+	ANSIBoldGreen   = "\033[1;32m"
+	ANSIDimItalic   = "\033[2;3m"
+	ANSIBoldMagenta = "\033[1;35m"
 )
 
-var colorDisabled atomic.Int32 // 0 = auto-detect, 1 = force disable
+var colorDisabled atomic.Int32 // 0 = auto-detect, 1 = force disable, 2 = force enable
 
 var isTerminal = func(w io.Writer) bool {
 	file, ok := w.(*os.File)
@@ -30,6 +40,10 @@ var isTerminal = func(w io.Writer) bool {
 
 // Disable disables all color output for the process.
 func Disable() { colorDisabled.Store(1) }
+
+// Force enables styling even when output is not a terminal. It is primarily
+// useful in tests that assert on styled output.
+func Force() { colorDisabled.Store(2) }
 
 // Reset restores automatic color detection. It is primarily useful in tests.
 func Reset() { colorDisabled.Store(0) }
@@ -45,7 +59,13 @@ func New(out, err io.Writer) *Writer {
 }
 
 func colorAllowed(terminal bool) bool {
-	return colorDisabled.Load() == 0 && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" && terminal
+	switch colorDisabled.Load() {
+	case 1:
+		return false
+	case 2:
+		return true
+	}
+	return os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" && terminal
 }
 
 func applyColor(w io.Writer, code, text string) string {
@@ -61,6 +81,28 @@ func (c *Writer) Style(code, text string) string {
 		return text
 	}
 	return applyColor(c.Out, code, text)
+}
+
+// Styled reports whether Out will receive ANSI styling. Structured views use
+// it to choose between Unicode glyphs and plain ASCII.
+func (c *Writer) Styled() bool {
+	return c != nil && colorAllowed(isTerminal(c.Out))
+}
+
+// Width returns the columns available on Out: the terminal size when Out is a
+// terminal, otherwise COLUMNS, otherwise 80.
+func (c *Writer) Width() int {
+	if c != nil {
+		if f, ok := c.Out.(*os.File); ok {
+			if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+				return w
+			}
+		}
+	}
+	if n, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && n > 0 {
+		return n
+	}
+	return 80
 }
 
 // Check writes a success indicator to Out.

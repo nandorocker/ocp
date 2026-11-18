@@ -6,7 +6,7 @@ LDFLAGS ?=
 
 export VERSION
 
-.PHONY: install uninstall clean release
+.PHONY: install uninstall clean release preview
 
 install: build
 	@if [ ! -d "$(BINDIR)" ]; then \
@@ -47,6 +47,11 @@ release:
 	done
 	@cd "$(DIST)" && sha256sum *.tar.gz > checksums.txt
 	@cat "$(DIST)/checksums.txt"
+
+# preview runs the live CLI output preview (see tools/preview/README.md).
+# Optional: make preview SCENARIOS="overview router"
+preview:
+	@tools/preview/watch.sh $(SCENARIOS)
 
 clean:
 	rm -rf "$(TARGET)" "$(DIST)"

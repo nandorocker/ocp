@@ -199,12 +199,23 @@ ocp use <profile>
 ocp run <profile> [args...]
 ocp list
 ocp status
+ocp show [profile] [--json] [--all]
 ocp ui [--no-open]
 ocp version
 ocp import [path]
 ocp upgrade [skill <name>]
 ocp reset
 ```
+
+`ocp show` describes the whole configuration file and what it affects, not just what works on this machine. It resolves from the source config, so it works before `ocp apply`, and it lists every profile and every machine's overlays. `ocp show` draws what applies to every profile (`Global`) and then the profiles as a tree, nested under the profile they extend, listing only what each profile adds. `ocp show <profile>` lists that profile's model, skills, plugins, MCP servers, providers, agents, instructions and extra files.
+
+- **Origin column:** entries the profile declares itself carry no mark. Everything else says where it comes from: `global`, `extends <profile>`, or the machine whose overlay supplies it. Your current machine is bold.
+- **Overrides:** an entry marked `*` replaces a different value that something lower already defined (a parent profile, `global` or an earlier layer). New entries and exact repeats are not overrides.
+- **Host-limited profiles:** a profile with `hosts:` shows `(windy only)` after its name in the tree and a `hosts` row in its detail, and only machine overlays that can apply to it are listed.
+- **Sources:** Git skills show just their repository, since Git is the default. Other sources are labelled `local`, `npm`, `path`, `remote` or `stdio`. MCP servers appear by name and type only; settings, headers and secrets are never printed, and credentials embedded in Git URLs are stripped.
+- **Width:** name lists in the tree are fitted to the terminal (`COLUMNS` when piped) and end in `+ N others`. In the detail view, more than eight skills are grouped by repository unless you pass `--all`.
+- **Warnings:** local skill folders and plugin files that no profile references are listed under the tree. A clean configuration prints nothing extra.
+- **Plain output:** piped output and `NO_COLOR` produce ASCII with no escapes. `--json` prints the same data for scripts.
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
 

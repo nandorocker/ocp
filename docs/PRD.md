@@ -973,6 +973,7 @@ ocp use <profile>
 ocp run <profile> [args...]
 ocp list
 ocp status
+ocp show [profile]
 ocp import [...]
 ocp upgrade [skill <name>]
 ocp reset
@@ -1078,6 +1079,14 @@ Useful after:
 `ocp sync` normally performs the equivalent of `apply` automatically.
 
 ## 20.1 Reset
+
+### `ocp show`
+
+Read-only view of the whole configuration: what applies to every profile (`Global`), and what each profile adds. `ocp show` draws a tree with profiles nested under the profile they extend; `ocp show <profile>` lists one profile's model, skills, plugins, MCP servers, providers, agents, instructions and extra files.
+
+It describes the configuration file and what it affects, so it is not filtered by machine: host-limited profiles are listed, and every machine's overlay appears with the machine's name. It resolves from the source configuration, so it works before `ocp apply`, takes no lock and writes nothing.
+
+Entries a profile declares carry no origin mark; others show `global`, `extends <profile>` or the machine name. `*` marks an entry that replaces a different value defined by a lower layer. Git skills show their repository with no label; other sources are `local`, `npm`, `path`, `remote` or `stdio`. MCP servers appear by name and type only, and credentials in Git URLs are stripped. The tree fits name lists to the terminal width (`+ N others`); skill lists over eight entries in a profile's detail are grouped by repository unless `--all` is given. Local skills and plugin files no profile references are reported as a warning. `--json` emits the same data. Styling follows `internal/color` and the design in `tools/preview`; piped output and `NO_COLOR` produce plain ASCII.
 
 ### `ocp reset`
 
@@ -1271,6 +1280,7 @@ ocp run <profile> [args...]
 
 ocp list
 ocp status
+ocp show [profile]
 
 ocp import [...]
 ocp upgrade [skill <name>]
