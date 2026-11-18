@@ -1,7 +1,7 @@
 #!/bin/sh
 # OCP installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/v0.1.0/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/v0.2.0/install.sh | sh
 #
 # Environment:
 #   OCP_VERSION    version tag to install (default: latest release)

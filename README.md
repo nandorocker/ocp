@@ -23,7 +23,7 @@ The installer detects your platform, downloads the matching release archive, ver
 Pin a specific version with `OCP_VERSION`, or override the destination with `OCP_INSTALL`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/main/install.sh | OCP_VERSION=0.1.0 OCP_INSTALL=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/nandorocker/ocp/main/install.sh | OCP_VERSION=0.2.0 OCP_INSTALL=/usr/local/bin sh
 ```
 
 Then initialize OCP:
