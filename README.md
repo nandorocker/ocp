@@ -5,7 +5,7 @@
 <h1 align="center">OCP</h1>
 
 <p align="center">
-  OCP generates and activates reproducible <a href="https://opencode.ai/">OpenCode</a> configuration profiles from one <code>ocp.yaml</code> source.
+  OCP generates and activates reproducible configuration profiles for OpenCode, Claude Code, and Codex from one <code>ocp.yaml</code> source.
 </p>
 
 <p align="center">
@@ -147,6 +147,32 @@ opencode
 `ocp sync` uses the current branch's configured upstream, safely merges non-conflicting divergence, pushes local canonical changes when automatic commits are enabled, resolves locked Git skills, renders profiles and preserves the active profile.
 
 ## Commands
+
+### Multiple harnesses
+
+Existing configurations remain OpenCode-only. Opt in to additional native destinations:
+
+```yaml
+version: 1
+harnesses: [opencode, claude, codex]
+
+config:
+  model:
+    opencode: openai/your-model
+    claude: opus
+    codex: your-model
+```
+
+Keep your existing profiles, shared instructions, agents, and skills. Scalar models such as `openai/your-model` still work: OCP preserves them for OpenCode, strips the known provider prefix for Codex, and reports incompatibility for Claude. Use a model mapping only where targets need different assignments.
+
+```sh
+ocp apply --preview
+ocp use openai
+ocp apply --harness claude
+ocp reset --harness codex
+```
+
+Launch each harness normally—no wrapper is needed. Explicit incompatible targets fail before configuration writes; default operations skip incompatible targets and keep their previous setup. New adapters support a conservative subset of settings and agent options; they do not translate permissions, provider configuration, MCP servers, or hooks. See [multi-harness support](docs/multi-harness.md) for syntax, supported content, and safety behavior.
 
 Run `ocp` or `ocp --help` for the command overview. Use `ocp help <command>` or `ocp <command> --help` for command options and examples.
 

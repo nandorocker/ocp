@@ -218,6 +218,11 @@ func Render(o RenderOptions) (RenderResult, error) {
 }
 
 func renderProfile(dest, source string, p config.Profile, provider SkillProvider, machine string) ([]string, error) {
+	var selectErr error
+	p, selectErr = openCodeProfile(source, p)
+	if selectErr != nil {
+		return nil, selectErr
+	}
 	if err := os.MkdirAll(dest, 0o700); err != nil {
 		return nil, err
 	}
@@ -269,7 +274,28 @@ func renderProfile(dest, source string, p config.Profile, provider SkillProvider
 				return nil, fmt.Errorf("agent %q: %w", name, err)
 			}
 			agentSources[name] = b
-			if _, sourceModel, err = agentFrontmatterModel(b); err != nil {
+			front, _, parseErr := nativeFrontmatter(b)
+			if parseErr != nil {
+				return nil, fmt.Errorf("agent %q: %w", name, parseErr)
+			}
+			value, exists := front["model"]
+			sourceModel = exists
+			if exists {
+				if err := config.ValidateModel(value); err != nil {
+					return nil, fmt.Errorf("agent %q: %w", name, err)
+				}
+			}
+			if sourceModel && assignmentModel == "" {
+				selected, modelErr := config.ResolveModel(value, "opencode")
+				if modelErr != nil {
+					return nil, fmt.Errorf("agent %q: %w", name, modelErr)
+				}
+				if _, mapped := value.(map[string]any); mapped {
+					b, err = patchAgentFrontmatterModel(b, selected)
+					agentSources[name] = b
+				}
+			}
+			if err != nil {
 				return nil, fmt.Errorf("agent %q: %w", name, err)
 			}
 			if sourceModel && assignmentModel != "" {
@@ -499,9 +525,9 @@ func agentFrontmatterModel(data []byte) (string, bool, error) {
 	if !exists {
 		return "", false, nil
 	}
-	model, ok := value.(string)
-	if !ok || model == "" {
-		return "", false, errors.New("frontmatter model must be a non-empty string")
+	model, err := config.ResolveModel(value, "opencode")
+	if err != nil || model == "" {
+		return "", false, errors.New("frontmatter model must be a non-empty string or harness mapping with an opencode entry")
 	}
 	return model, true, nil
 }
@@ -720,6 +746,10 @@ func drift(p Paths) ([]string, error) {
 	if !filepath.IsAbs(root) {
 		root = filepath.Join(filepath.Dir(p.Current), root)
 	}
+	return driftRoot(root)
+}
+
+func driftRoot(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -757,6 +787,10 @@ func drift(p Paths) ([]string, error) {
 }
 
 func atomicFile(path string, data []byte, mode os.FileMode) error {
+	return atomicFileWrite(path, data, mode, func(f *os.File, b []byte) (int, error) { return f.Write(b) })
+}
+
+func atomicFileWrite(path string, data []byte, mode os.FileMode, write func(*os.File, []byte) (int, error)) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -766,8 +800,12 @@ func atomicFile(path string, data []byte, mode os.FileMode) error {
 	}
 	name := f.Name()
 	defer os.Remove(name)
-	if err := f.Chmod(mode); err == nil {
-		_, err = f.Write(data)
+	if err = f.Chmod(mode); err == nil {
+		var n int
+		n, err = write(f, data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
 	}
 	if err == nil {
 		err = f.Sync()

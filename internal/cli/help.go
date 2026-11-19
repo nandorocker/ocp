@@ -48,8 +48,15 @@ func commands() []command {
 	return []command{
 		{"setup", "setup [options]", "Initialize OCP from a local source or repository.", "Set up OCP.", []string{"ocp setup", "ocp setup --source ./ocp-config"}, func(f *flag.FlagSet) { configureSetup(f, &setupOptions{}) }},
 		{"sync", "sync [options]", "Synchronize configuration and apply profiles.", "Sync the configured source repository and render profiles.", []string{"ocp sync", "ocp sync --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "overwrite generated drift") }},
-		{"apply", "apply [options]", "Render the current configuration.", "Apply the configured source without synchronizing it.", []string{"ocp apply", "ocp apply --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "overwrite generated drift") }},
-		{"use", "use <profile>", "Activate a rendered profile.", "Set the active OpenCode profile.", []string{"ocp use default"}, nil},
+		{"apply", "apply [options]", "Refresh selected harness configurations.", "Apply the source without synchronizing it. Explicit incompatible targets fail; default incompatible targets are skipped unchanged.", []string{"ocp apply", "ocp apply --harness claude", "ocp apply --preview"}, func(f *flag.FlagSet) {
+			configureHarness(f, &harnessOptions{})
+			configureForce(f, &forceOptions{}, "overwrite generated OpenCode drift")
+			f.Bool("recover", false, "resume an interrupted native update; requires --harness")
+		}},
+		{"use", "use <profile> [options]", "Select a profile for compatible harnesses.", "Set the active profile independently for selected harnesses.", []string{"ocp use default", "ocp use openai --harness codex"}, func(f *flag.FlagSet) {
+			configureHarness(f, &harnessOptions{})
+			configureForce(f, &forceOptions{}, "overwrite generated OpenCode drift")
+		}},
 		{"run", "run <profile> [opencode arguments...]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
 		{"list", "list", "List rendered profiles.", "List rendered profiles and mark the active profile.", []string{"ocp list"}, nil},
 		{"status", "status", "Show OCP status.", "Show the configured source and active profile.", []string{"ocp status"}, nil},
@@ -60,7 +67,10 @@ func commands() []command {
 		{"version", "version", "Show the OCP version.", "Print the version embedded when OCP was built.", []string{"ocp version", "ocp --version"}, nil},
 		{"import", "import [options] [path]", "Import an OpenCode configuration.", "Import an OpenCode configuration into an OCP source.", []string{"ocp import ~/.config/opencode", "ocp import --source ./ocp-config"}, func(f *flag.FlagSet) { configureImport(f, &importOptions{}, "") }},
 		{"upgrade", "upgrade [arguments]", "Upgrade OCP components.", "Upgrade is deferred and not implemented in this MVP.", []string{"ocp upgrade"}, nil},
-		{"reset", "reset [options]", "Detach OCP from OpenCode.", "Remove OCP-managed OpenCode configuration.", []string{"ocp reset", "ocp reset --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "replace user-owned OpenCode config") }},
+		{"reset", "reset [options]", "Detach OCP and restore owned configuration.", "Restore OCP-owned files and settings. Native ownership conflicts are never forced.", []string{"ocp reset", "ocp reset --harness claude"}, func(f *flag.FlagSet) {
+			configureHarness(f, &harnessOptions{})
+			configureForce(f, &forceOptions{}, "replace user-owned OpenCode config")
+		}},
 	}
 }
 
@@ -74,7 +84,7 @@ func commandByName(name string) *command {
 }
 
 func (r *Runner) help() {
-	fmt.Fprint(r.Out, `OCP manages reproducible OpenCode profiles.
+	fmt.Fprint(r.Out, `OCP manages reproducible profiles for OpenCode, Claude Code, and Codex.
 
 Usage: ocp [global options] <command> [arguments]
 
