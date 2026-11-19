@@ -30,7 +30,7 @@ func TestGlobalHelpDoesNotResolvePaths(t *testing.T) {
 			}
 			got := out.String()
 			for _, want := range []string{
-				"OCP manages reproducible OpenCode profiles.", "Usage: ocp [global options] <command> [arguments]", "Getting Started", "ocp setup",
+				"OCP manages reproducible profiles for OpenCode, Claude Code, and Codex.", "Usage: ocp [global options] <command> [arguments]", "Getting Started", "ocp setup",
 				"Commands:", "setup", "sync", "apply", "use", "run", "list", "status", "import", "upgrade", "reset",
 				"Global Options:", "--help", "--version", "--no-color", "https://github.com/nandorocker/ocp",
 			} {

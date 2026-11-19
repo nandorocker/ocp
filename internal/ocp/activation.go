@@ -71,6 +71,9 @@ func ActiveProfile(p Paths) (string, error) {
 	if target == "" {
 		return "", nil
 	}
+	if name := pinnedProfile(p, target); name != "" {
+		return name, nil
+	}
 	rel, err := filepath.Rel(p.Current, target)
 	if err != nil || rel == "." || strings.Contains(rel, string(filepath.Separator)) {
 		return "", nil
@@ -192,6 +195,9 @@ func managedTarget(p Paths, link string) string {
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Clean(filepath.Join(filepath.Dir(link), target))
+	}
+	if pinnedProfile(p, target) != "" {
+		return target
 	}
 	rel, err := filepath.Rel(p.Current, target)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {

@@ -19,6 +19,7 @@ const FileName = "ocp.yaml"
 // Document is the parsed OCP configuration.
 type Document struct {
 	Version          int                       `yaml:"version"`
+	Harnesses        []string                  `yaml:"harnesses,omitempty"`
 	Hosts            []string                  `yaml:"hosts,omitempty"`
 	Machines         map[string]MachineOverlay `yaml:"machines,omitempty"`
 	Config           map[string]any            `yaml:"config,omitempty"`
@@ -27,6 +28,8 @@ type Document struct {
 	Plugins          []string                  `yaml:"plugins,omitempty"`
 	Agents           map[string]Agent          `yaml:"agents,omitempty"`
 	Profiles         map[string]ProfileSpec    `yaml:"profiles,omitempty"`
+	Claude           map[string]any            `yaml:"claude,omitempty"`
+	Codex            map[string]any            `yaml:"codex,omitempty"`
 	profilesDeclared bool
 	SourceDir        string `yaml:"-"` // runtime only, never serialized
 }
@@ -41,6 +44,8 @@ type ProfileSpec struct {
 	Skills       []Skill                   `yaml:"skills,omitempty"`
 	Plugins      []string                  `yaml:"plugins,omitempty"`
 	Agents       map[string]Agent          `yaml:"agents,omitempty"`
+	Claude       map[string]any            `yaml:"claude,omitempty"`
+	Codex        map[string]any            `yaml:"codex,omitempty"`
 	// FilesDirs lists source-relative directories whose contents are copied
 	// into the rendered profile root. Runtime only; discovered from
 	// profiles/<name>/files/ and never read from YAML.
@@ -55,6 +60,8 @@ type MachineOverlay struct {
 	Skills       []Skill          `yaml:"skills,omitempty"`
 	Plugins      []string         `yaml:"plugins,omitempty"`
 	Agents       map[string]Agent `yaml:"agents,omitempty"`
+	Claude       map[string]any   `yaml:"claude,omitempty"`
+	Codex        map[string]any   `yaml:"codex,omitempty"`
 }
 
 // Skill identifies a local or Git-backed skill source. Ref is optional. Path
@@ -104,6 +111,10 @@ type Profile struct {
 	// the most distant ancestor to the profile itself; later directories win
 	// per path.
 	FilesDirs []string
+	// Claude and Codex are native settings blocks for those harnesses,
+	// merged like Config.
+	Claude map[string]any
+	Codex  map[string]any
 }
 
 // Load parses and validates an OCP document from path.
@@ -159,22 +170,24 @@ type composition struct {
 	hosts        []string
 	machines     map[string]MachineOverlay
 	filesDirs    []string
+	claude       map[string]any
+	codex        map[string]any
 }
 
 func compositionFromDocument(d *Document) composition {
-	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents, hosts: d.Hosts, machines: d.Machines}
+	return composition{config: d.Config, instructions: d.Instructions, skills: d.Skills, plugins: d.Plugins, agents: d.Agents, hosts: d.Hosts, machines: d.Machines, claude: d.Claude, codex: d.Codex}
 }
 func compositionFromProfile(p ProfileSpec) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs, p.Claude, p.Codex}
 }
 func compositionFromResolved(p Profile) composition {
-	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs}
+	return composition{p.Config, p.Instructions, p.Skills, p.Plugins, p.Agents, p.Hosts, p.Machines, p.FilesDirs, p.Claude, p.Codex}
 }
 func compositionFromOverlay(o MachineOverlay) composition {
-	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil, nil}
+	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil, nil, o.Claude, o.Codex}
 }
 func resolved(name string, c composition) Profile {
-	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...)}
+	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...), cloneMap(c.claude), cloneMap(c.codex)}
 }
 
 func mergeComposition(base, child composition) composition {
@@ -191,6 +204,8 @@ func mergeComposition(base, child composition) composition {
 		hosts:        append([]string(nil), hosts...),
 		machines:     mergeMachines(base.machines, child.machines),
 		filesDirs:    appendUnique(base.filesDirs, child.filesDirs),
+		claude:       mergeMap(base.claude, child.claude),
+		codex:        mergeMap(base.codex, child.codex),
 	}
 }
 
@@ -213,6 +228,8 @@ func mergeMachines(base, child map[string]MachineOverlay) map[string]MachineOver
 				Skills:       merged.skills,
 				Plugins:      merged.plugins,
 				Agents:       merged.agents,
+				Claude:       merged.claude,
+				Codex:        merged.codex,
 			}
 			continue
 		}
@@ -228,6 +245,8 @@ func cloneMachineOverlay(o MachineOverlay) MachineOverlay {
 		Skills:       append([]Skill(nil), o.Skills...),
 		Plugins:      append([]string(nil), o.Plugins...),
 		Agents:       cloneAgents(o.Agents),
+		Claude:       cloneMap(o.Claude),
+		Codex:        cloneMap(o.Codex),
 	}
 }
 
@@ -421,11 +440,14 @@ func cloneValue(value any) any {
 }
 
 func parseDocument(node *yaml.Node) (*Document, error) {
-	values, err := mapping(node, "configuration", "version", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents", "profiles")
+	values, err := mapping(node, "configuration", "version", "harnesses", "hosts", "machines", "config", "claude", "codex", "instructions", "skills", "plugins", "agents", "profiles")
 	if err != nil {
 		return nil, err
 	}
 	doc := &Document{}
+	if doc.Harnesses, err = harnesses(values["harnesses"]); err != nil {
+		return nil, err
+	}
 	if value := values["version"]; value != nil {
 		if err := value.Decode(&doc.Version); err != nil {
 			return nil, fmt.Errorf("version must be an integer")
@@ -438,6 +460,9 @@ func parseDocument(node *yaml.Node) (*Document, error) {
 		return nil, err
 	}
 	if doc.Config, err = nativeMap(values["config"], "config"); err != nil {
+		return nil, err
+	}
+	if doc.Claude, doc.Codex, err = harnessBlocks(values, ""); err != nil {
 		return nil, err
 	}
 	if doc.Instructions, err = stringsList(values["instructions"], "instructions"); err != nil {
@@ -485,7 +510,7 @@ func profiles(node *yaml.Node) (map[string]ProfileSpec, error) {
 // availability and per-machine overlays.
 func parseProfileSpec(node *yaml.Node, label string) (ProfileSpec, error) {
 	var p ProfileSpec
-	values, err := mapping(node, label, "extends", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents")
+	values, err := mapping(node, label, "extends", "hosts", "machines", "config", "claude", "codex", "instructions", "skills", "plugins", "agents")
 	if err != nil {
 		return p, err
 	}
@@ -507,6 +532,9 @@ func parseProfileSpec(node *yaml.Node, label string) (ProfileSpec, error) {
 		return p, err
 	}
 	if p.Config, err = nativeMap(values["config"], label+" config"); err != nil {
+		return p, err
+	}
+	if p.Claude, p.Codex, err = harnessBlocks(values, label+" "); err != nil {
 		return p, err
 	}
 	if p.Instructions, err = stringsList(values["instructions"], label+" instructions"); err != nil {
@@ -554,12 +582,15 @@ func parseMachines(node *yaml.Node, label string) (map[string]MachineOverlay, er
 			return nil, err
 		}
 		overlayLabel := label + " machines " + name
-		values, err := mapping(node.Content[i+1], overlayLabel, "config", "instructions", "skills", "plugins", "agents")
+		values, err := mapping(node.Content[i+1], overlayLabel, "config", "claude", "codex", "instructions", "skills", "plugins", "agents")
 		if err != nil {
 			return nil, err
 		}
 		var overlay MachineOverlay
 		if overlay.Config, err = nativeMap(values["config"], overlayLabel+" config"); err != nil {
+			return nil, err
+		}
+		if overlay.Claude, overlay.Codex, err = harnessBlocks(values, overlayLabel+" "); err != nil {
 			return nil, err
 		}
 		if overlay.Instructions, err = stringsList(values["instructions"], overlayLabel+" instructions"); err != nil {
@@ -819,6 +850,8 @@ func cloneProfileSpec(ps ProfileSpec) ProfileSpec {
 		Plugins:      append([]string(nil), ps.Plugins...),
 		Agents:       cloneAgents(ps.Agents),
 		FilesDirs:    append([]string(nil), ps.FilesDirs...),
+		Claude:       cloneMap(ps.Claude),
+		Codex:        cloneMap(ps.Codex),
 	}
 }
 
@@ -851,25 +884,20 @@ func agents(node *yaml.Node) (map[string]Agent, error) {
 		if agent.Config, err = nativeMap(values["config"], "agent "+name+" config"); err != nil {
 			return nil, err
 		}
-		if configured, exists := agent.Config["model"]; exists {
-			model, ok := configured.(string)
-			if !ok || model == "" {
-				return nil, fmt.Errorf("agent %q config.model must be a non-empty string", name)
-			}
-		}
 		if v := values["model"]; v != nil {
-			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" || v.Value == "" {
-				return nil, fmt.Errorf("agent %q model must be a non-empty string", name)
+			model, err := modelValue(v, "agent "+name+" model")
+			if err != nil {
+				return nil, err
 			}
 			if configured, exists := agent.Config["model"]; exists {
-				if configured.(string) != v.Value {
+				if !reflect.DeepEqual(configured, model) {
 					return nil, fmt.Errorf("agent %q model conflicts with config.model", name)
 				}
 			}
 			if agent.Config == nil {
 				agent.Config = map[string]any{}
 			}
-			agent.Config["model"] = v.Value
+			agent.Config["model"] = model
 		}
 		out[name] = agent
 	}
@@ -1063,6 +1091,9 @@ func nativeMap(node *yaml.Node, label string) (map[string]any, error) {
 	}
 	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", label)
+	}
+	if err := validateNativeModels(node, label); err != nil {
+		return nil, err
 	}
 	value, err := nativeValue(node)
 	if err != nil {
@@ -1265,6 +1296,12 @@ func normalizeProfileSpecs(profiles map[string]ProfileSpec) map[string]ProfileSp
 		profile = cloneProfileSpec(profile)
 		if len(profile.Config) == 0 {
 			profile.Config = nil
+		}
+		if len(profile.Claude) == 0 {
+			profile.Claude = nil
+		}
+		if len(profile.Codex) == 0 {
+			profile.Codex = nil
 		}
 		if len(profile.Instructions) == 0 {
 			profile.Instructions = nil

@@ -53,6 +53,33 @@ func Prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 	return prepare(sourceDir, dataDir, skills, allowBootstrap, isGitSource)
 }
 
+// Cached prepares a read-only provider for previews. Missing locked checkouts
+// are reported, never fetched or replaced.
+func Cached(sourceDir, dataDir string, skills []config.Skill) (ocp.SkillProvider, error) {
+	prepared, _, err := Prepare(sourceDir, dataDir, skills, false)
+	if err != nil {
+		return nil, err
+	}
+	return cachedProvider{prepared.(*provider)}, nil
+}
+
+type cachedProvider struct{ p *provider }
+
+func (p cachedProvider) SkillDir(skill config.Skill) (string, error) {
+	entry, ok := p.p.entries[lockKey(skill.Source, skill.Path)]
+	if !ok || entry.Ref != skill.Ref || entry.Path != skill.Path {
+		return "", fmt.Errorf("Git skill %q is not locked", skill.Source)
+	}
+	dest := cachePath(p.p.dataDir, canonicalSource(entry.Source), entry.Commit)
+	if !checkoutAt(dest, entry.Commit) {
+		return "", fmt.Errorf("Git skill %q is not cached; run ocp sync before previewing", skill.Source)
+	}
+	if entry.Path == "" {
+		return dest, nil
+	}
+	return subpathDir(dest, entry)
+}
+
 func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bool, include func(string) bool) (ocp.SkillProvider, bool, error) {
 	gitSkills := make([]config.Skill, 0, len(skills))
 	for _, skill := range skills {
