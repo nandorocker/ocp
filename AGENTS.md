@@ -42,7 +42,7 @@ Packages (all `internal/`):
 | `importer` | Best-effort import from OpenCode and OPM configurations |
 | `color` | Semantic terminal coloring wrapper |
 
-CLI uses stdlib `flag` — not cobra/spf13. Command surface is flat: `setup, sync, apply, use, run, list, status, show, import, upgrade(deferred), reset`.
+CLI uses stdlib `flag` — not cobra/spf13. Command surface is flat: `setup, sync, apply, use, run, list, status, show, import, upgrade, reset`.
 
 ## Conventions
 
@@ -57,4 +57,4 @@ CLI uses stdlib `flag` — not cobra/spf13. Command surface is flat: `setup, syn
 - **Drift tracking.** Each rendered profile contains `.ocp-manifest.json` with SHA-256 hashes. `ocp.Render()` compares current files against the manifest before applying.
 - **Source safety.** Path walking validates no symlinks escape the source tree (`sourcePathSafe`, `within`). Skill sources cannot reference outside the canonical directory.
 - **XDG paths.** Default locations derive from `HOME` + `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_STATE_HOME`. Override via env vars or by constructing custom `ocp.Paths` in tests.
-- **`upgrade` is not implemented.** Returns exit code 2. Documented in PRD §15 but deferred.
+- **`upgrade` only moves Git skills that follow a branch.** Skills with no `@ref` or a branch ref advance; tag and full-commit refs are pinned. It re-renders, and restores `ocp.lock` if rendering fails. Plugins are out of scope (PRD §15).

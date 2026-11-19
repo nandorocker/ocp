@@ -186,8 +186,7 @@ func (r *Runner) Run(args []string) error {
 	case "import":
 		return r.importConfig(p, args[1:])
 	case "upgrade":
-		fmt.Fprintln(r.Err, "upgrade is deferred and not implemented in this MVP")
-		return &ExitError{Code: 2}
+		return r.upgrade(p, args[1:])
 	}
 	return nil
 }
@@ -610,6 +609,7 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 	if e != nil {
 		return nil, e
 	}
+	skills.PruneCache(source, p.Data)
 	active := ""
 	if takeover {
 		names := result.Profiles
@@ -725,6 +725,7 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 	if e != nil {
 		return e
 	}
+	skills.PruneCache(source, p.Data)
 	r.c.Printf("Profiles: %s", strings.Join(result.Profiles, ", "))
 	for _, w := range result.Warnings {
 		r.c.Warning(w)

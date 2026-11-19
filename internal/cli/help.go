@@ -56,7 +56,7 @@ func commands() []command {
 		{"show", "show [options] [profile]", "Show what profiles carry.", "Show the whole configuration: what applies to every profile and what each profile adds, with where each entry comes from, including every machine.", []string{"ocp show", "ocp show router", "ocp show apple --all", "ocp show --json"}, func(f *flag.FlagSet) { configureShow(f, &showOptions{}) }},
 		{"version", "version", "Show the OCP version.", "Print the version embedded when OCP was built.", []string{"ocp version", "ocp --version"}, nil},
 		{"import", "import [options] [path]", "Import an OpenCode configuration.", "Import an OpenCode configuration into an OCP source.", []string{"ocp import ~/.config/opencode", "ocp import --source ./ocp-config"}, func(f *flag.FlagSet) { configureImport(f, &importOptions{}, "") }},
-		{"upgrade", "upgrade [arguments]", "Upgrade OCP components.", "Upgrade is deferred and not implemented in this MVP.", []string{"ocp upgrade"}, nil},
+		{"upgrade", "upgrade [options] [skill <name>]", "Advance Git skills that follow a branch.", "Move Git skills that follow a branch to its latest commit, update ocp.lock and re-render profiles. Skills pinned to a tag or commit are never advanced.", []string{"ocp upgrade", "ocp upgrade --preview", "ocp upgrade skill frontend-design"}, func(f *flag.FlagSet) { configureUpgrade(f, &upgradeOptions{}) }},
 		{"reset", "reset [options]", "Detach OCP from OpenCode.", "Remove OCP-managed OpenCode configuration.", []string{"ocp reset", "ocp reset --force"}, func(f *flag.FlagSet) { configureForce(f, &forceOptions{}, "replace user-owned OpenCode config") }},
 	}
 }

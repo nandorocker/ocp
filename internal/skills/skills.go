@@ -84,20 +84,29 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 		}
 		requested[key] = skill.Ref
 		entry, ok := lock.Skills[key]
-		if ok {
-			if entry.Ref != skill.Ref {
-				return nil, false, fmt.Errorf("Git skill %q ref %q does not match lock ref %q", skill.Source, skill.Ref, entry.Ref)
-			}
+		if ok && entry.Ref == skill.Ref {
 			continue
 		}
 		if !allowBootstrap {
+			if ok {
+				return nil, false, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp sync` to lock the new ref", skill.Source, skill.Ref, entry.Ref)
+			}
 			return nil, false, fmt.Errorf("Git skill %q has no entry in %s", skill.Source, lockPath)
 		}
-		commit, err := resolve(skill.Source, skill.Ref)
+		// A new declaration, or a changed ref, is resolved and locked.
+		commit, kind, err := lookupRef(skill.Source, skill.Ref)
 		if err != nil {
 			return nil, false, err
 		}
-		lock.Skills[key] = LockEntry{Source: skill.Source, Path: skill.Path, Ref: skill.Ref, Commit: commit}
+		next := LockEntry{Source: skill.Source, Path: skill.Path, Ref: skill.Ref, Commit: commit}
+		if kind == refCommit {
+			// A commit ID is taken as written, so fetch it before it can be
+			// locked, committed and pushed to other machines.
+			if _, err := (&provider{dataDir: dataDir}).checkout(next); err != nil {
+				return nil, false, fmt.Errorf("Git skill %q: commit %s: %w", skill.Source, commit, err)
+			}
+		}
+		lock.Skills[key] = next
 		changed = true
 	}
 	if changed {
@@ -105,8 +114,18 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 			return nil, false, err
 		}
 	}
-	pruneCache(dataDir, lock)
 	return &provider{dataDir: dataDir, entries: lock.Skills}, changed, nil
+}
+
+// PruneCache removes cached checkouts that the source's current lock no
+// longer references. Call it only after a successful render, so a refused
+// change can still fall back to the checkouts it started from.
+func PruneCache(sourceDir, dataDir string) {
+	lock, exists, err := readLock(filepath.Join(sourceDir, lockFileName))
+	if err != nil || !exists {
+		return
+	}
+	pruneCache(dataDir, lock)
 }
 
 var cacheDirPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -178,6 +197,11 @@ func writeLock(filename string, lock Lock) error {
 	if err != nil {
 		return err
 	}
+	return writeLockBytes(filename, append(b, '\n'))
+}
+
+// writeLockBytes replaces the lock with temp-file-then-rename.
+func writeLockBytes(filename string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
 		return err
 	}
@@ -188,7 +212,7 @@ func writeLock(filename string, lock Lock) error {
 	name := f.Name()
 	defer os.Remove(name)
 	if err = f.Chmod(0o600); err == nil {
-		_, err = f.Write(append(b, '\n'))
+		_, err = f.Write(data)
 	}
 	if err == nil {
 		err = f.Sync()
@@ -292,35 +316,67 @@ func subpathDir(root string, entry LockEntry) (string, error) {
 	return dir, nil
 }
 
-func resolve(source, ref string) (string, error) {
-	args := []string{"ls-remote", source}
-	if ref == "" {
-		args = append(args, "HEAD")
-	} else {
-		args = append(args, ref)
+type refKind int
+
+const (
+	refOther refKind = iota
+	refBranch
+	refTag
+	refCommit
+)
+
+// lookupRef resolves a skill ref on the remote. An empty ref follows the
+// remote's HEAD. A full commit ID is returned as is. Otherwise the name is
+// matched exactly, in Git's own order (the name itself, then refs/<name>,
+// refs/tags/<name>, refs/heads/<name>), because ls-remote also returns refs
+// that merely end in the name, such as refs/heads/release/main for "main".
+func lookupRef(source, ref string) (string, refKind, error) {
+	if commitPattern.MatchString(ref) {
+		return ref, refCommit, nil
 	}
-	out, err := gitOutput("", args...)
+	// ls-remote matches patterns against whole trailing path components, so
+	// an annotated tag's peeled "<name>^{}" line needs its own pattern.
+	patterns := []string{"HEAD"}
+	if ref != "" {
+		patterns = []string{ref, ref + "^{}"}
+	}
+	out, err := gitOutput("", append([]string{"ls-remote", source}, patterns...)...)
 	if err != nil {
-		return "", fmt.Errorf("resolve Git skill %q at %q: %w", source, ref, err)
+		return "", refOther, fmt.Errorf("resolve Git skill %q at %q: %w", source, ref, err)
 	}
-	var commit, peeled string
+	refs := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 || !commitPattern.MatchString(fields[0]) {
 			continue
 		}
-		commit = fields[0]
-		if strings.HasSuffix(fields[1], "^{}") {
-			peeled = fields[0]
+		// An annotated tag is listed twice; the peeled ^{} line names the commit.
+		if name, peeled := strings.CutSuffix(fields[1], "^{}"); peeled {
+			refs[name] = fields[0]
+		} else if _, seen := refs[name]; !seen {
+			refs[name] = fields[0]
 		}
 	}
-	if peeled != "" {
-		commit = peeled
+	if ref == "" {
+		if commit, ok := refs["HEAD"]; ok {
+			return commit, refBranch, nil
+		}
+	} else {
+		for _, name := range []string{ref, "refs/" + ref, "refs/tags/" + ref, "refs/heads/" + ref} {
+			commit, ok := refs[name]
+			if !ok {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(name, "refs/tags/"):
+				return commit, refTag, nil
+			case strings.HasPrefix(name, "refs/heads/"):
+				return commit, refBranch, nil
+			}
+			return commit, refOther, nil
+		}
 	}
-	if commit == "" {
-		return "", fmt.Errorf("resolve Git skill %q at %q: ref not found", source, ref)
-	}
-	return commit, nil
+	return "", refOther, fmt.Errorf("resolve Git skill %q at %q: ref not found", source, ref)
 }
 
 func checkoutAt(dir, commit string) bool {
@@ -339,7 +395,7 @@ func gitOutput(dir string, args ...string) ([]byte, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args[4:], " "), err, strings.TrimSpace(string(out)))

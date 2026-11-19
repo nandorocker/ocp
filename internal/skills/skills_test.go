@@ -254,9 +254,10 @@ func TestPruneCacheRemovesUnreferencedCheckoutsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := prepare(source, data, []config.Skill{skill}, false, func(string) bool { return true }); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("prepare pruned before a render succeeded: %v", err)
 	}
+	PruneCache(source, data)
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale checkout survived: %v", err)
 	}
@@ -267,4 +268,21 @@ func TestPruneCacheRemovesUnreferencedCheckoutsOnly(t *testing.T) {
 		t.Errorf("referenced checkout removed: %v", err)
 	}
 	_ = commit
+}
+
+func TestPrepareLocksFullCommitRef(t *testing.T) {
+	repo, commit := bareRepository(t)
+	source, data := t.TempDir(), t.TempDir()
+	skill := config.Skill{Source: repo, Ref: commit}
+	p, changed, err := prepare(source, data, []config.Skill{skill}, true, func(string) bool { return true })
+	if err != nil || !changed {
+		t.Fatalf("bootstrap commit ref = %v, changed %v", err, changed)
+	}
+	dir, err := p.SkillDir(skill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
 }
