@@ -21,7 +21,6 @@ import (
 	"github.com/nando/ocp/internal/ocp"
 	"github.com/nando/ocp/internal/repository"
 	"github.com/nando/ocp/internal/skills"
-	"github.com/nando/ocp/internal/ui"
 )
 
 // ExitError preserves a child process's exit status for the command entry point.
@@ -76,7 +75,6 @@ type Runner struct {
 	Paths    func() (ocp.Paths, error)
 	Getwd    func() (string, error)
 	Exec     func(string, []string, []string) error
-	RunUI    func(ui.Options) error
 	c        *color.Writer
 }
 
@@ -111,9 +109,6 @@ func (r *Runner) defaults() {
 			c.Stdin, c.Stdout, c.Stderr, c.Env = r.In, r.Out, r.Err, env
 			return c.Run()
 		}
-	}
-	if r.RunUI == nil {
-		r.RunUI = ui.Run
 	}
 }
 
@@ -186,8 +181,6 @@ func (r *Runner) Run(args []string) error {
 		return r.status(p, args[1:])
 	case "show":
 		return r.show(p, args[1:])
-	case "ui":
-		return r.webUI(p, args[1:])
 	case "reset":
 		return r.reset(p, args[1:])
 	case "import":
@@ -199,40 +192,6 @@ func (r *Runner) Run(args []string) error {
 	return nil
 }
 
-func (r *Runner) webUI(p ocp.Paths, args []string) error {
-	var noOpen bool
-	var trustedOrigin string
-	if err := parse("ui", args, func(f *flag.FlagSet) {
-		f.BoolVar(&noOpen, "no-open", false, "do not open the default browser")
-		f.StringVar(&trustedOrigin, "trusted-origin", "", "exact HTTPS origin trusted to access the UI")
-	}); err != nil {
-		return err
-	}
-	state, err := sourceState(p)
-	if err != nil {
-		return err
-	}
-	source, err := canonical(state.Source)
-	if err != nil {
-		return err
-	}
-	return r.RunUI(ui.Options{
-		Paths:         p,
-		Source:        source,
-		Out:           r.Out,
-		Err:           r.Err,
-		Open:          !noOpen,
-		TrustedOrigin: trustedOrigin,
-		OpenCode:      r.OpenCode,
-		Apply: func() (ui.ApplyResult, error) {
-			result, err := r.install(p, source, state.AutoCommit, false, false, false, state.Machine)
-			if err != nil {
-				return ui.ApplyResult{}, err
-			}
-			return ui.ApplyResult{Profiles: result.Profiles, Warnings: result.Warnings, Active: result.Active, FellBack: result.Fallback.FellBack, NoActive: result.Fallback.NoActive}, nil
-		},
-	})
-}
 func parse(name string, args []string, configure func(*flag.FlagSet)) error {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
 	f.SetOutput(io.Discard)

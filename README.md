@@ -200,7 +200,6 @@ ocp run <profile> [args...]
 ocp list
 ocp status
 ocp show [profile] [--json] [--all]
-ocp ui [--no-open]
 ocp version
 ocp import [path]
 ocp upgrade [skill <name>]
@@ -218,8 +217,6 @@ ocp reset
 - **Plain output:** piped output and `NO_COLOR` produce ASCII with no escapes. `--json` prints the same data for scripts.
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
-
-The UI binds only to loopback. To use it through a trusted reverse proxy, opt in to one exact browser-facing origin with `ocp ui --trusted-origin https://host.example:4100`. OCP does not trust forwarded host or scheme headers.
 
 `upgrade` is intentionally deferred in the current MVP implementation. Git-backed skills are initialized during setup or sync and reproduced from `ocp.lock`.
 

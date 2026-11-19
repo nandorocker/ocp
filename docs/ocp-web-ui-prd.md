@@ -1,3 +1,5 @@
+> **Archived.** The web UI was removed from `main` (#12). The last working version is on the `archive/web-ui` branch. See #19 for why.
+
 # OCP Web UI — MVP Product Requirements Document
 
 ## 1. Summary
