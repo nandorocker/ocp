@@ -107,7 +107,11 @@ func (r *Runner) upgrade(p ocp.Paths, args []string) error {
 	for _, w := range res.Warnings {
 		r.c.Warning(w)
 	}
-	r.c.Muted("Run `ocp sync` to commit ocp.lock and share it with your other machines")
+	if state.AutoCommit {
+		r.c.Muted("Run `ocp sync` to commit ocp.lock and share it with your other machines")
+	} else {
+		r.c.Muted("Commit ocp.lock in your source to share it with your other machines")
+	}
 	return nil
 }
 
@@ -129,6 +133,8 @@ func (r *Runner) reportUpgrade(results []skills.UpgradeResult) {
 			r.c.Muted(label + "up to date")
 		case skills.Pinned:
 			r.c.Muted(fmt.Sprintf("%spinned at %s", label, res.Ref))
+		case skills.Skipped:
+			r.c.Warning(label + "skipped: " + res.Note)
 		}
 	}
 }

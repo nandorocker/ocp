@@ -19,8 +19,12 @@ const (
 	Advanced UpgradeStatus = iota
 	// Current means the locked commit is already the branch tip.
 	Current
-	// Pinned means the skill names a tag or commit and is never advanced.
+	// Pinned means the skill names a tag, a commit or another fixed ref and
+	// is never advanced.
 	Pinned
+	// Skipped means the skill's ref could not be resolved upstream, for
+	// example because the branch was deleted. Note says why.
+	Skipped
 )
 
 // UpgradeResult reports one locked Git skill.
@@ -32,6 +36,7 @@ type UpgradeResult struct {
 	Old    string
 	New    string
 	Status UpgradeStatus
+	Note   string
 }
 
 // UpgradePlan is a resolved upgrade. Planning reads the lock and the remotes
@@ -122,13 +127,15 @@ func planUpgrade(sourceDir, dataDir string, skills []config.Skill, name string, 
 			return nil, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp sync` first", s.Name(), s.Ref, entry.Ref)
 		}
 		result := UpgradeResult{Name: s.Name(), Source: s.Source, Path: s.Path, Ref: s.Ref, Old: entry.Commit, New: entry.Commit, Status: Current}
-		commit, branch, err := branchTip(s.Source, s.Ref)
+		commit, kind, err := lookupRef(s.Source, s.Ref)
 		if err != nil {
-			return nil, err
-		}
-		if !branch {
 			if name != "" {
-				return nil, fmt.Errorf("Git skill %q is pinned to %q; change its ref in the source to move it", s.Name(), s.Ref)
+				return nil, err
+			}
+			result.Status, result.Note = Skipped, err.Error()
+		} else if kind != refBranch {
+			if name != "" {
+				return nil, fmt.Errorf("Git skill %q is pinned to %q; change its ref in the source and run `ocp sync` to move it", s.Name(), s.Ref)
 			}
 			result.Status = Pinned
 		} else if commit != entry.Commit {
@@ -139,43 +146,6 @@ func planUpgrade(sourceDir, dataDir string, skills []config.Skill, name string, 
 		plan.Results = append(plan.Results, result)
 	}
 	return plan, nil
-}
-
-// branchTip resolves a skill's ref when it follows a branch. An empty ref
-// follows the remote's default branch. A tag, or a full commit ID, is pinned;
-// a name that is both a tag and a branch counts as the tag, matching Git's
-// own precedence.
-func branchTip(source, ref string) (string, bool, error) {
-	if ref == "" {
-		commit, err := resolve(source, "")
-		return commit, err == nil, err
-	}
-	if commitPattern.MatchString(ref) {
-		return "", false, nil
-	}
-	branchName := "refs/heads/" + strings.TrimPrefix(ref, "refs/heads/")
-	tagName := "refs/tags/" + strings.TrimPrefix(ref, "refs/tags/")
-	out, err := gitOutput("", "ls-remote", source, ref)
-	if err != nil {
-		return "", false, fmt.Errorf("resolve Git skill %q at %q: %w", source, ref, err)
-	}
-	var branchCommit string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !commitPattern.MatchString(fields[0]) {
-			continue
-		}
-		switch strings.TrimSuffix(fields[1], "^{}") {
-		case tagName:
-			return "", false, nil
-		case branchName:
-			branchCommit = fields[0]
-		}
-	}
-	if branchCommit == "" {
-		return "", false, fmt.Errorf("resolve Git skill %q at %q: ref not found", source, ref)
-	}
-	return branchCommit, true, nil
 }
 
 // Fetch checks out every advanced commit into the cache and checks that a

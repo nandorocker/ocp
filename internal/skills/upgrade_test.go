@@ -258,3 +258,124 @@ func TestUpgradeFetchFailureLeavesLockAndRestoreUndoesWrite(t *testing.T) {
 		t.Fatal("restore did not put back the original lock")
 	}
 }
+
+func TestLookupRefMatchesExactlyInGitOrder(t *testing.T) {
+	u := newUpstream(t)
+	first := u.commit(map[string]string{"SKILL.md": "one"})
+	// "dual" is both a tag (at first) and a branch (at second): the tag wins.
+	gitRun(t, u.work, "tag", "-a", "-m", "annotated", "dual")
+	gitRun(t, u.work, "push", "-q", "origin", "dual")
+	second := u.commit(map[string]string{"SKILL.md": "two"})
+	gitRun(t, u.work, "push", "-q", "origin", "main:refs/heads/dual")
+	// A decoy branch that also ends in "main" must not be picked for "main".
+	gitRun(t, u.work, "push", "-q", "origin", first+":refs/heads/release/main")
+	// A branch whose name contains a slash.
+	gitRun(t, u.work, "push", "-q", "origin", first+":refs/heads/feature/x")
+
+	for _, tc := range []struct {
+		ref    string
+		commit string
+		kind   refKind
+	}{
+		{"", second, refBranch},
+		{"main", second, refBranch},
+		{"refs/heads/main", second, refBranch},
+		{"heads/main", second, refBranch},
+		{"release/main", first, refBranch},
+		{"feature/x", first, refBranch},
+		{"dual", first, refTag},
+		{"refs/tags/dual", first, refTag},
+		{first, first, refCommit},
+	} {
+		commit, kind, err := lookupRef(u.bare, tc.ref)
+		if err != nil || commit != tc.commit || kind != tc.kind {
+			t.Errorf("lookupRef(%q) = %s, %v, %v; want %s, %v", tc.ref, short(commit), kind, err, short(tc.commit), tc.kind)
+		}
+	}
+	if _, _, err := lookupRef(u.bare, "gone"); err == nil || !strings.Contains(err.Error(), "ref not found") {
+		t.Errorf("missing ref error = %v", err)
+	}
+}
+
+func short(commit string) string {
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+	return commit
+}
+
+func TestUpgradeSkipsUnresolvableRefButAdvancesOthers(t *testing.T) {
+	u, other := newUpstream(t), newUpstream(t)
+	u.commit(map[string]string{"SKILL.md": "one"})
+	gitRun(t, u.work, "push", "-q", "origin", "main:dev")
+	other.commit(map[string]string{"SKILL.md": "one"})
+	source, data := t.TempDir(), t.TempDir()
+	dev := config.Skill{Source: u.bare, Ref: "dev"}
+	follow := config.Skill{Source: other.bare}
+	skills := []config.Skill{dev, follow}
+	lockAll(t, source, data, skills)
+	gitRun(t, u.work, "push", "-q", "origin", ":dev")
+	next := other.commit(map[string]string{"SKILL.md": "two"})
+
+	plan, err := planUpgrade(source, data, skills, "", allSources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := map[string]UpgradeStatus{}
+	for _, r := range plan.Results {
+		status[r.Source] = r.Status
+	}
+	if status[u.bare] != Skipped || status[other.bare] != Advanced {
+		t.Fatalf("results = %#v", plan.Results)
+	}
+	if err := plan.Fetch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.Write(); err != nil {
+		t.Fatal(err)
+	}
+	if lockedCommit(t, source, follow) != next {
+		t.Fatal("resolvable skill did not advance")
+	}
+	// Both test upstreams are named "up", so name the deleted one alone.
+	if _, err := planUpgrade(source, data, []config.Skill{dev}, dev.Name(), allSources); err == nil || !strings.Contains(err.Error(), "ref not found") {
+		t.Fatalf("naming a skill whose ref is gone = %v", err)
+	}
+}
+
+func TestPrepareRelocksChangedRefOnlyWithBootstrap(t *testing.T) {
+	u := newUpstream(t)
+	first := u.commit(map[string]string{"SKILL.md": "one"})
+	u.tag("v1")
+	second := u.commit(map[string]string{"SKILL.md": "two"})
+	u.tag("v2")
+	source, data := t.TempDir(), t.TempDir()
+	v1 := config.Skill{Source: u.bare, Ref: "v1"}
+	lockAll(t, source, data, []config.Skill{v1})
+	v2 := config.Skill{Source: u.bare, Ref: "v2"}
+	if _, _, err := prepare(source, data, []config.Skill{v2}, false, allSources); err == nil || !strings.Contains(err.Error(), "run `ocp sync`") {
+		t.Fatalf("ref change without bootstrap = %v", err)
+	}
+	if lockedCommit(t, source, v1) != first {
+		t.Fatal("refused ref change modified the lock")
+	}
+	if _, changed, err := prepare(source, data, []config.Skill{v2}, true, allSources); err != nil || !changed {
+		t.Fatalf("ref change with bootstrap = %v, changed %v", err, changed)
+	}
+	if lockedCommit(t, source, v2) != second {
+		t.Fatal("changed ref was not re-locked")
+	}
+}
+
+func TestPrepareRejectsUnknownCommitBeforeLocking(t *testing.T) {
+	u := newUpstream(t)
+	u.commit(map[string]string{"SKILL.md": "one"})
+	source, data := t.TempDir(), t.TempDir()
+	bogus := config.Skill{Source: u.bare, Ref: strings.Repeat("0", 40)}
+	if _, _, err := prepare(source, data, []config.Skill{bogus}, true, allSources); err == nil {
+		t.Fatal("bootstrap locked a commit that does not exist")
+	}
+	if _, err := os.Stat(filepath.Join(source, lockFileName)); !os.IsNotExist(err) {
+		t.Fatalf("lock written for an unknown commit: %v", err)
+	}
+}

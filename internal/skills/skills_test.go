@@ -254,9 +254,10 @@ func TestPruneCacheRemovesUnreferencedCheckoutsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := prepare(source, data, []config.Skill{skill}, false, func(string) bool { return true }); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("prepare pruned before a render succeeded: %v", err)
 	}
+	PruneCache(source, data)
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale checkout survived: %v", err)
 	}
