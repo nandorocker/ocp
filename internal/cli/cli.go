@@ -186,8 +186,7 @@ func (r *Runner) Run(args []string) error {
 	case "import":
 		return r.importConfig(p, args[1:])
 	case "upgrade":
-		fmt.Fprintln(r.Err, "upgrade is deferred and not implemented in this MVP")
-		return &ExitError{Code: 2}
+		return r.upgrade(p, args[1:])
 	}
 	return nil
 }

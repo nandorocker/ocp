@@ -178,6 +178,11 @@ func writeLock(filename string, lock Lock) error {
 	if err != nil {
 		return err
 	}
+	return writeLockBytes(filename, append(b, '\n'))
+}
+
+// writeLockBytes replaces the lock with temp-file-then-rename.
+func writeLockBytes(filename string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
 		return err
 	}
@@ -188,7 +193,7 @@ func writeLock(filename string, lock Lock) error {
 	name := f.Name()
 	defer os.Remove(name)
 	if err = f.Chmod(0o600); err == nil {
-		_, err = f.Write(append(b, '\n'))
+		_, err = f.Write(data)
 	}
 	if err == nil {
 		err = f.Sync()
