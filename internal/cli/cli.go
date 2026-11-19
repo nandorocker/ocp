@@ -265,6 +265,11 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 	if autoFlag.NArg() != 0 {
 		return commandUsageError("setup", fmt.Errorf("setup: unexpected arguments: %s", strings.Join(autoFlag.Args(), " ")))
 	}
+	release, err := lock(p)
+	if err != nil {
+		return err
+	}
+	defer release()
 	state, err := ocp.LoadState(p)
 	if err != nil {
 		return err
@@ -276,11 +281,6 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		if options.source != "" || options.repo != "" {
 			return errors.New("setup --migrate-profiles uses the configured source; do not pass --source or --repo")
 		}
-		release, err := lock(p)
-		if err != nil {
-			return err
-		}
-		defer release()
 		changed, err := config.MigrateProfiles(state.Source)
 		if err != nil {
 			return fmt.Errorf("migrate profiles: %w", err)
@@ -302,11 +302,6 @@ func (r *Runner) setup(p ocp.Paths, args []string) error {
 		if options.repo != "" {
 			return errors.New("setup --migrate-profiles cannot be combined with --repo")
 		}
-		release, err := lock(p)
-		if err != nil {
-			return err
-		}
-		defer release()
 		if _, err := config.MigrateProfiles(options.source); err != nil {
 			return fmt.Errorf("migrate profiles: %w", err)
 		}
@@ -529,10 +524,18 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 	} else if e != nil {
 		return e
 	}
-	if _, e := r.install(p, source, autoCommit, true, force, true, machine); e != nil {
+	doc, e := config.Load(file)
+	if e != nil {
 		return e
 	}
-	if activeProfile != "" {
+	wanted := ""
+	if doc.Harnesses != nil {
+		wanted = activeProfile
+	}
+	if _, e := r.installSelected(p, source, autoCommit, true, force, true, machine, wanted); e != nil {
+		return e
+	}
+	if activeProfile != "" && doc.Harnesses == nil {
 		if e := ocp.Activate(p, activeProfile); e != nil {
 			return e
 		}
@@ -593,9 +596,48 @@ func profileNames(source string) ([]string, error) {
 	return out, nil
 }
 func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, takeover bool, machine string) (*installResult, error) {
+	return r.installSelected(p, source, auto, bootstrap, force, takeover, machine, "")
+}
+
+func (r *Runner) installSelected(p ocp.Paths, source string, auto, bootstrap, force, takeover bool, machine, wanted string) (*installResult, error) {
 	source, e := canonical(source)
 	if e != nil {
 		return nil, fmt.Errorf("canonical source: %w", e)
+	}
+	doc, e := config.Load(filepath.Join(source, config.FileName))
+	if e != nil {
+		return nil, e
+	}
+	if doc.Harnesses != nil {
+		state, e := ocp.LoadState(p)
+		if e != nil {
+			return nil, e
+		}
+		if state == nil {
+			state = &ocp.State{Version: 1, Source: source, AutoCommit: auto, Machine: machine}
+		}
+		state.Source, state.Machine = source, machine
+		if e := nativeEnvironment(doc.EnabledHarnesses()); e != nil {
+			return nil, e
+		}
+		if e := r.refreshHarnesses(p, state, doc, harnessOptions{force: force}, wanted, bootstrap); e != nil {
+			return nil, e
+		}
+		// OpenCode takeover persists its preservation record itself.
+		if saved, e := ocp.LoadState(p); e != nil {
+			return nil, e
+		} else if saved != nil {
+			state.PreservedOriginal = saved.PreservedOriginal
+		}
+		if e := ocp.SaveState(p, *state); e != nil {
+			return nil, e
+		}
+		names, e := profileNames(source)
+		if e != nil {
+			return nil, e
+		}
+		active, _ := ocp.ActiveProfile(p)
+		return &installResult{Source: source, Profiles: names, Active: active}, nil
 	}
 	gs, e := gitSkills(source)
 	if e != nil {
@@ -631,8 +673,8 @@ func (r *Runner) install(p ocp.Paths, source string, auto, bootstrap, force, tak
 	return res, nil
 }
 func (r *Runner) apply(p ocp.Paths, args []string) error {
-	var options forceOptions
-	if e := parse("apply", args, func(f *flag.FlagSet) { configureForce(f, &options, "overwrite generated drift") }); e != nil {
+	options, _, e := parseHarness("apply", args, false)
+	if e != nil {
 		return e
 	}
 	rel, e := lock(p)
@@ -640,9 +682,19 @@ func (r *Runner) apply(p ocp.Paths, args []string) error {
 		return e
 	}
 	defer rel()
+	if options.recover {
+		return r.recoverHarnesses(p, options)
+	}
 	s, e := sourceState(p)
 	if e != nil {
 		return e
+	}
+	doc, e := sourceDocument(s)
+	if e != nil {
+		return e
+	}
+	if multiHarness(doc, options) {
+		return r.refreshHarnesses(p, s, doc, options, "", false)
 	}
 	res, e := r.install(p, s.Source, s.AutoCommit, false, options.force, false, s.Machine)
 	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
@@ -718,6 +770,13 @@ func (r *Runner) sync(p ocp.Paths, args []string) error {
 		}
 		r.reportRepository(lockResult)
 	}
+	doc, e := sourceDocument(s)
+	if e != nil {
+		return e
+	}
+	if doc.Harnesses != nil {
+		return r.refreshHarnesses(p, s, doc, harnessOptions{force: options.force}, "", false)
+	}
 	result, e := ocp.Render(ocp.RenderOptions{Paths: p, Source: source, Force: options.force, SkillProvider: provider, Machine: s.Machine})
 	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "sync")
@@ -764,21 +823,30 @@ func (r *Runner) reportRepository(res repository.Result) {
 	r.c.Printf("Repository: %s", strings.Join(actions, ", "))
 }
 func (r *Runner) use(p ocp.Paths, args []string) error {
-	if len(args) != 1 {
-		return commandUsageError("use", errors.New("use requires exactly one profile"))
+	options, profile, e := parseHarness("use", args, true)
+	if e != nil {
+		return e
 	}
 	rel, e := lock(p)
 	if e != nil {
 		return e
 	}
 	defer rel()
-	if _, e := sourceState(p); e != nil {
+	s, e := sourceState(p)
+	if e != nil {
 		return e
 	}
-	if e := ocp.Activate(p, args[0]); e != nil {
+	doc, e := sourceDocument(s)
+	if e != nil {
 		return e
 	}
-	r.c.Success("Active profile: " + args[0])
+	if multiHarness(doc, options) {
+		return r.refreshHarnesses(p, s, doc, options, profile, false)
+	}
+	if e := ocp.Activate(p, profile); e != nil {
+		return e
+	}
+	r.c.Success("Active profile: " + profile)
 	return nil
 }
 func (r *Runner) run(p ocp.Paths, args []string) error {
@@ -847,6 +915,48 @@ func (r *Runner) list(p ocp.Paths, args []string) error {
 	if e := parse("list", args, func(*flag.FlagSet) {}); e != nil {
 		return e
 	}
+	if s, e := sourceState(p); e == nil {
+		if doc, e := sourceDocument(s); e != nil {
+			return e
+		} else if doc.Harnesses != nil {
+			profiles, e := doc.ResolveFromDirForMachine(s.Source, s.Machine)
+			if e != nil {
+				return e
+			}
+			for _, profile := range profiles {
+				fmt.Fprintln(r.Out, profile.Name)
+				for _, h := range doc.EnabledHarnesses() {
+					var reason error
+					if h == "opencode" {
+						reason = ocp.ValidateOpenCodeProfile(s.Source, profile)
+					} else {
+						withoutSkills := profile
+						withoutSkills.Skills = nil
+						_, reason = ocp.PrepareNativeProfile(s.Source, withoutSkills, h, s.Machine, nil)
+					}
+					if reason != nil {
+						fmt.Fprintf(r.Out, "  %s: unavailable — %v\n", h, reason)
+						continue
+					}
+					active := ""
+					if h == "opencode" {
+						active, e = ocp.ActiveProfile(p)
+					} else {
+						active, e = ocp.NativeActiveProfile(p, h)
+					}
+					if e != nil {
+						return e
+					}
+					mark := "available"
+					if active == profile.Name {
+						mark = "active"
+					}
+					fmt.Fprintf(r.Out, "  %s: %s\n", h, mark)
+				}
+			}
+			return nil
+		}
+	}
 	names, e := generated(p)
 	if e != nil {
 		return e
@@ -868,6 +978,11 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 	s, e := sourceState(p)
 	if e != nil {
 		return e
+	}
+	if doc, e := sourceDocument(s); e != nil {
+		return e
+	} else if doc.Harnesses != nil {
+		return r.harnessStatus(p, s, doc)
 	}
 	source, e := canonical(s.Source)
 	if e != nil {
@@ -906,11 +1021,11 @@ func (r *Runner) status(p ocp.Paths, args []string) error {
 		}
 	}
 	line("Generated profiles", strings.Join(styled, ", "))
-	return nil
+	return r.nativeSelections(p)
 }
 func (r *Runner) reset(p ocp.Paths, args []string) error {
-	var options forceOptions
-	if e := parse("reset", args, func(f *flag.FlagSet) { configureForce(f, &options, "replace user-owned OpenCode config") }); e != nil {
+	options, _, e := parseHarness("reset", args, false)
+	if e != nil {
 		return e
 	}
 	rel, e := lock(p)
@@ -918,6 +1033,38 @@ func (r *Runner) reset(p ocp.Paths, args []string) error {
 		return e
 	}
 	defer rel()
+	s, e := sourceState(p)
+	if e != nil {
+		return e
+	}
+	targets := []string{"claude", "codex"}
+	if len(options.targets) > 0 {
+		targets = options.targets
+	}
+	if e := r.resetHarnesses(p, targets, options.preview); e != nil {
+		return e
+	}
+	resetOpenCode := len(options.targets) == 0
+	for _, h := range options.targets {
+		if h == "opencode" {
+			resetOpenCode = true
+		}
+	}
+	if !resetOpenCode || options.preview {
+		if resetOpenCode && options.preview {
+			fmt.Fprintln(r.Out, "opencode: would detach")
+		}
+		return nil
+	}
+	// Detaching OpenCode must not orphan remaining native ownership records.
+	keepState := false
+	for _, h := range []string{"claude", "codex"} {
+		name, e := ocp.NativeActiveProfile(p, h)
+		if e != nil {
+			return e
+		}
+		keepState = keepState || name != ""
+	}
 	source, e := ocp.Reset(p, options.force)
 	if e != nil && strings.Contains(e.Error(), "user-owned") && !options.force && r.tty() {
 		fmt.Fprint(r.Out, "A user-owned OpenCode configuration will be replaced. Continue? [y/N] ")
@@ -929,6 +1076,12 @@ func (r *Runner) reset(p ocp.Paths, args []string) error {
 	}
 	if e != nil {
 		return e
+	}
+	if keepState {
+		s.PreservedOriginal = ""
+		if e := ocp.SaveState(p, *s); e != nil {
+			return e
+		}
 	}
 	r.c.Success("OCP detached.")
 	r.c.Muted("Your OCP configuration remains at: " + source)

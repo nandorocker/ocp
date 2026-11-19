@@ -19,6 +19,7 @@ const FileName = "ocp.yaml"
 // Document is the parsed OCP configuration.
 type Document struct {
 	Version          int                       `yaml:"version"`
+	Harnesses        []string                  `yaml:"harnesses,omitempty"`
 	Hosts            []string                  `yaml:"hosts,omitempty"`
 	Machines         map[string]MachineOverlay `yaml:"machines,omitempty"`
 	Config           map[string]any            `yaml:"config,omitempty"`
@@ -421,11 +422,14 @@ func cloneValue(value any) any {
 }
 
 func parseDocument(node *yaml.Node) (*Document, error) {
-	values, err := mapping(node, "configuration", "version", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents", "profiles")
+	values, err := mapping(node, "configuration", "version", "harnesses", "hosts", "machines", "config", "instructions", "skills", "plugins", "agents", "profiles")
 	if err != nil {
 		return nil, err
 	}
 	doc := &Document{}
+	if doc.Harnesses, err = harnesses(values["harnesses"]); err != nil {
+		return nil, err
+	}
 	if value := values["version"]; value != nil {
 		if err := value.Decode(&doc.Version); err != nil {
 			return nil, fmt.Errorf("version must be an integer")
@@ -851,25 +855,20 @@ func agents(node *yaml.Node) (map[string]Agent, error) {
 		if agent.Config, err = nativeMap(values["config"], "agent "+name+" config"); err != nil {
 			return nil, err
 		}
-		if configured, exists := agent.Config["model"]; exists {
-			model, ok := configured.(string)
-			if !ok || model == "" {
-				return nil, fmt.Errorf("agent %q config.model must be a non-empty string", name)
-			}
-		}
 		if v := values["model"]; v != nil {
-			if v.Kind != yaml.ScalarNode || v.Tag != "!!str" || v.Value == "" {
-				return nil, fmt.Errorf("agent %q model must be a non-empty string", name)
+			model, err := modelValue(v, "agent "+name+" model")
+			if err != nil {
+				return nil, err
 			}
 			if configured, exists := agent.Config["model"]; exists {
-				if configured.(string) != v.Value {
+				if !reflect.DeepEqual(configured, model) {
 					return nil, fmt.Errorf("agent %q model conflicts with config.model", name)
 				}
 			}
 			if agent.Config == nil {
 				agent.Config = map[string]any{}
 			}
-			agent.Config["model"] = v.Value
+			agent.Config["model"] = model
 		}
 		out[name] = agent
 	}
@@ -1063,6 +1062,9 @@ func nativeMap(node *yaml.Node, label string) (map[string]any, error) {
 	}
 	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", label)
+	}
+	if err := validateNativeModels(node, label); err != nil {
+		return nil, err
 	}
 	value, err := nativeValue(node)
 	if err != nil {
