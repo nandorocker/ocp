@@ -184,6 +184,8 @@ func (r *Runner) Run(args []string) error {
 		return r.list(p, args[1:])
 	case "status":
 		return r.status(p, args[1:])
+	case "show":
+		return r.show(p, args[1:])
 	case "ui":
 		return r.webUI(p, args[1:])
 	case "reset":

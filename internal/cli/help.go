@@ -53,6 +53,7 @@ func commands() []command {
 		{"run", "run <profile> [opencode arguments...]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
 		{"list", "list", "List rendered profiles.", "List rendered profiles and mark the active profile.", []string{"ocp list"}, nil},
 		{"status", "status", "Show OCP status.", "Show the configured source and active profile.", []string{"ocp status"}, nil},
+		{"show", "show [options] [profile]", "Show what profiles carry.", "Show the whole configuration: what applies to every profile and what each profile adds, with where each entry comes from, including every machine.", []string{"ocp show", "ocp show router", "ocp show apple --all", "ocp show --json"}, func(f *flag.FlagSet) { configureShow(f, &showOptions{}) }},
 		{"ui", "ui [options]", "Manage profiles in a local web interface.", "Start the local OCP profile and agent editor.", []string{"ocp ui", "ocp ui --no-open", "ocp ui --trusted-origin https://host.example:4100"}, func(f *flag.FlagSet) {
 			f.Bool("no-open", false, "do not open the default browser")
 			f.String("trusted-origin", "", "exact HTTPS origin trusted to access the UI")

@@ -113,3 +113,56 @@ func TestWriterChecksEachDestination(t *testing.T) {
 		t.Fatalf("terminal stderr missing ANSI: %q", errOut.String())
 	}
 }
+
+func TestStyledAndForce(t *testing.T) {
+	var out bytes.Buffer
+	c := New(&out, &out)
+	t.Cleanup(Reset)
+
+	Reset()
+	if c.Styled() {
+		t.Fatal("a buffer is not a terminal, so styling must be off by default")
+	}
+	if got := c.Style(ANSICyan, "x"); got != "x" {
+		t.Fatalf("unstyled = %q", got)
+	}
+
+	Force()
+	if !c.Styled() {
+		t.Fatal("Force should enable styling for non-terminals")
+	}
+	if got := c.Style(ANSIBoldGreen, "x"); got != "\x1b[1;32mx\x1b[0m" {
+		t.Fatalf("forced style = %q", got)
+	}
+
+	Disable()
+	if c.Styled() || c.Style(ANSICyan, "x") != "x" {
+		t.Fatal("Disable must win")
+	}
+
+	var nilWriter *Writer
+	if nilWriter.Styled() {
+		t.Fatal("nil writer cannot be styled")
+	}
+}
+
+func TestWidthFallsBackToColumnsThenEighty(t *testing.T) {
+	var out bytes.Buffer
+	c := New(&out, &out)
+	t.Setenv("COLUMNS", "")
+	if got := c.Width(); got != 80 {
+		t.Fatalf("default width = %d", got)
+	}
+	t.Setenv("COLUMNS", "120")
+	if got := c.Width(); got != 120 {
+		t.Fatalf("COLUMNS width = %d", got)
+	}
+	t.Setenv("COLUMNS", "junk")
+	if got := c.Width(); got != 80 {
+		t.Fatalf("invalid COLUMNS width = %d", got)
+	}
+	var nilWriter *Writer
+	if got := nilWriter.Width(); got != 80 {
+		t.Fatalf("nil writer width = %d", got)
+	}
+}

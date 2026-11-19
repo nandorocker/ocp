@@ -492,6 +492,10 @@ func localSourcePath(source, folder, ref string) (string, error) {
 	return path, nil
 }
 
+// IsLocalPlugin reports whether a plugin declaration names a local file under
+// the source's plugins folder rather than an npm package.
+func IsLocalPlugin(name string) bool { return localPlugin(name) }
+
 func localPlugin(name string) bool {
 	if strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "plugins/") {
 		return true
