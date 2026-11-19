@@ -598,15 +598,6 @@ func agentFrontmatterModel(data []byte) (string, bool, error) {
 	return model, true, nil
 }
 
-// AgentSourceModel reads a source agent using the renderer's path-safety rules.
-func AgentSourceModel(source, name string) (string, bool, error) {
-	b, err := readSource(source, name, false)
-	if err != nil {
-		return "", false, err
-	}
-	return agentFrontmatterModel(b)
-}
-
 // patchAgentFrontmatterModel changes only a generated agent copy. yaml.v3
 // preserves mapping comments and unrelated fields while retaining the Markdown body.
 func patchAgentFrontmatterModel(data []byte, model string) ([]byte, error) {
