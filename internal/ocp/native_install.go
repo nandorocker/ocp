@@ -362,15 +362,26 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 			}
 		}
 	}
+	// Snapshot which collections exist before installing, so every entry of
+	// a collection OCP creates knows it, not just the first one.
+	present := map[string]bool{}
+	for k := range settings {
+		present[k] = true
+	}
+	ownedBefore := map[string]bool{}
+	for _, owned := range old.Keys {
+		ownedBefore[strings.Join(owned.Path, "\x00")] = true
+	}
 	for _, owned := range settingsKeys(harness, rendered.Settings) {
 		owned.Original, owned.OriginalExists = keyValue(settings, owned.Path)
 		if len(owned.Path) == 2 {
-			_, parentExists := settings[owned.Path[0]]
-			owned.CreatedParent = !parentExists
+			owned.CreatedParent = !present[owned.Path[0]]
 			// Named entries the user wrote by hand are never replaced; an
-			// identical one is adopted and left in place on reset. Environment
-			// variables are plain settings: overwritten, then restored.
-			if owned.Path[0] != "env" && owned.OriginalExists && !nativeEqual(owned.Original, owned.Installed) {
+			// identical one is adopted and left in place on reset, and OCP
+			// may then update it. Environment variables are plain settings:
+			// overwritten, then restored.
+			adopted := ownedBefore[strings.Join(owned.Path, "\x00")]
+			if owned.Path[0] != "env" && !adopted && owned.OriginalExists && !nativeEqual(owned.Original, owned.Installed) {
 				return plan, fmt.Errorf("%s %s %q already exists and is not owned by OCP; remove it or make it identical", harness, owned.Path[0], owned.Path[1])
 			}
 		}

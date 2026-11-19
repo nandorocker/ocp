@@ -221,9 +221,13 @@ func harnessBlock(node *yaml.Node, label, harness string) (map[string]any, error
 			if s, ok := v.(string); !ok || strings.TrimSpace(s) == "" {
 				return nil, fmt.Errorf("%s.%s must be a non-empty string", label, key)
 			}
-		case "model", "model_provider", "model_reasoning_effort":
+		case "model", "model_provider":
 			if s, ok := v.(string); !ok || strings.TrimSpace(s) == "" {
 				return nil, fmt.Errorf("%s.%s must be a non-empty string", label, key)
+			}
+		case "model_reasoning_effort":
+			if !slices.Contains([]string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}, fmt.Sprint(v)) {
+				return nil, fmt.Errorf("%s.model_reasoning_effort must be one of minimal, low, medium, high, xhigh, max, ultra", label)
 			}
 		case "env":
 			env, ok := v.(map[string]any)

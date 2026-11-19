@@ -40,19 +40,28 @@ func openCodeMCPServers(config map[string]any) ([]mcpServer, error) {
 	if !ok {
 		return nil, fmt.Errorf("config.mcp must be an object")
 	}
+	// mcp.servers.<name> is the current shape; mcp.<name> with a type is the
+	// legacy one. A legacy server literally named "servers" has a type.
 	entries := map[string]any{}
-	for name, value := range root {
-		if servers, ok := value.(map[string]any); ok && name == "servers" {
+	if servers, ok := root["servers"].(map[string]any); ok {
+		if _, legacy := servers["type"]; !legacy {
 			for server, spec := range servers {
 				entries[server] = spec
 			}
+		}
+	}
+	for name, value := range root {
+		spec, ok := value.(map[string]any)
+		if !ok {
 			continue
 		}
-		if spec, ok := value.(map[string]any); ok {
-			if _, typed := spec["type"]; typed {
-				entries[name] = spec
-			}
+		if _, typed := spec["type"]; !typed {
+			continue
 		}
+		if _, dup := entries[name]; dup && name != "servers" {
+			return nil, fmt.Errorf("mcp server %q is defined both as mcp.%s and mcp.servers.%s; keep one", name, name, name)
+		}
+		entries[name] = spec
 	}
 	names := make([]string, 0, len(entries))
 	for name := range entries {
@@ -208,8 +217,8 @@ func codexMCPServer(s mcpServer, source string) (map[string]any, string, error) 
 		var forward []string
 		for _, k := range sortedKeys(s.Env) {
 			v := s.Env[k]
-			if strings.ContainsAny(v, "\n\x00") {
-				return nil, "", fmt.Errorf("mcp server %q environment %s must not contain newlines", s.Name, k)
+			if hasSubstitution(v) && strings.ContainsAny(v, "\n\x00") {
+				return nil, "", fmt.Errorf("mcp server %q environment %s: a template read at run time must not contain newlines", s.Name, k)
 			}
 			switch name, exact := exactEnv(v); {
 			case !hasSubstitution(v):
@@ -302,7 +311,7 @@ var ocpExecutable = func() (string, error) {
 			}
 		}
 	}
-	if strings.Contains(exe, "go-build") || strings.HasPrefix(exe, os.TempDir()+string(filepath.Separator)) {
+	if strings.Contains(exe, string(filepath.Separator)+"go-build") || strings.HasPrefix(exe, os.TempDir()+string(filepath.Separator)) {
 		return "", fmt.Errorf("ocp is running from a temporary build (%s); install it so harnesses can call it", exe)
 	}
 	return exe, nil

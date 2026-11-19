@@ -67,6 +67,9 @@ type tomlItem struct {
 	path  []string
 	kind  unstable.Kind
 	start int // offset of the line the item starts on
+	// For a root key/value with a single (non-dotted) key and a scalar
+	// value, the value's byte range, so the value can change in place.
+	valueStart, valueEnd int
 }
 
 func hasPrefix(path, prefix []string) bool {
@@ -128,6 +131,12 @@ func tomlItems(data []byte) ([]tomlItem, error) {
 		item := tomlItem{kind: node.Kind, start: lineStart(data, first)}
 		if node.Kind == unstable.KeyValue {
 			item.path = append(append([]string(nil), current...), keys...)
+			if v := node.Value(); len(current) == 0 && len(keys) == 1 && v.Raw.Length > 0 {
+				switch v.Kind {
+				case unstable.String, unstable.Integer, unstable.Float, unstable.Bool:
+					item.valueStart, item.valueEnd = int(v.Raw.Offset), int(v.Raw.Offset+v.Raw.Length)
+				}
+			}
 		} else {
 			current = keys
 			item.path = keys
@@ -172,8 +181,9 @@ func tomlString(s string) string {
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(s)
-	// JSON string escapes are a subset of TOML basic-string escapes.
-	return strings.TrimSuffix(b.String(), "\n")
+	// JSON string escapes are a subset of TOML basic-string escapes. TOML
+	// also forbids a raw DEL, which JSON leaves alone.
+	return strings.ReplaceAll(strings.TrimSuffix(b.String(), "\n"), "\x7f", `\u007F`)
 }
 
 func tomlInline(v any) (string, error) {
@@ -275,6 +285,32 @@ func patchNativeTOML(data []byte, before, after map[string]any) ([]byte, error) 
 		text       string
 	}
 	var cuts []edit
+	// A root scalar that stays a scalar changes in place, keeping its
+	// position and trailing comment, so reset restores the bytes exactly.
+	inPlace := map[string]bool{}
+	for _, path := range paths {
+		if len(path) != 1 {
+			continue
+		}
+		b, bok := before[path[0]]
+		a, aok := after[path[0]]
+		_, bTable := b.(map[string]any)
+		_, aTable := a.(map[string]any)
+		if !bok || !aok || bTable || aTable {
+			continue
+		}
+		for _, it := range items {
+			if it.kind == unstable.KeyValue && it.valueEnd > 0 && len(it.path) == 1 && it.path[0] == path[0] {
+				text, err := tomlInline(a)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", path[0], err)
+				}
+				cuts = append(cuts, edit{start: it.valueStart, end: it.valueEnd, text: text})
+				inPlace[path[0]] = true
+				break
+			}
+		}
+	}
 	firstTable := len(data)
 	for _, it := range items {
 		if it.kind != unstable.KeyValue {
@@ -283,6 +319,9 @@ func patchNativeTOML(data []byte, before, after map[string]any) ([]byte, error) 
 		}
 	}
 	for _, path := range paths {
+		if len(path) == 1 && inPlace[path[0]] {
+			continue
+		}
 		for i, it := range items {
 			limit := len(data)
 			if i+1 < len(items) {
@@ -331,7 +370,7 @@ func patchNativeTOML(data []byte, before, after map[string]any) ([]byte, error) 
 	var top, tables strings.Builder
 	for _, path := range paths {
 		value, exists := keyValue(after, path)
-		if !exists {
+		if !exists || len(path) == 1 && inPlace[path[0]] {
 			continue
 		}
 		if m, ok := value.(map[string]any); ok {

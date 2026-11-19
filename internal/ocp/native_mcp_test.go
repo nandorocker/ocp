@@ -1,6 +1,7 @@
 package ocp
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -198,5 +199,111 @@ func TestExpandSubstitutions(t *testing.T) {
 	}
 	if _, err := ExpandSubstitutions("{file:" + filepath.Join(dir, "missing") + "}"); err == nil {
 		t.Fatal("missing file accepted")
+	}
+}
+
+func applyNative(t *testing.T, p Paths, harness string, rendered NativeProfile) {
+	t.Helper()
+	plan, err := PlanNativeInstall(p, harness, "default", rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyNativePlan(p, plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeAdoptedEntryCanBeUpdatedAndResetRestoresHandWritten(t *testing.T) {
+	p := nativeTestPaths(t)
+	configPath := nativeTestPath(t, p, "codex", "config")
+	hand := "[mcp_servers.shared]\nurl = \"https://shared.test\"\n"
+	nativeTestWrite(t, configPath, []byte(hand))
+	server := map[string]any{"url": "https://shared.test"}
+	applyNative(t, p, "codex", NativeProfile{Settings: map[string]any{"mcp_servers": map[string]any{"shared": server}}})
+	updated := map[string]any{"url": "https://shared.test", "env_http_headers": map[string]any{"X": "X_KEY"}}
+	applyNative(t, p, "codex", NativeProfile{Settings: map[string]any{"mcp_servers": map[string]any{"shared": updated}}})
+	settings, _ := nativeSettings(nativeTestRead(t, configPath), "codex")
+	if !nativeEqual(settings["mcp_servers"], map[string]any{"shared": updated}) {
+		t.Fatalf("adopted entry not updated: %v", settings)
+	}
+	nativeTestReset(t, p, "codex")
+	if got := string(nativeTestRead(t, configPath)); got != hand {
+		t.Fatalf("reset = %q, want the hand-written table", got)
+	}
+}
+
+func TestNativeResetRemovesCollectionsAndFilesOCPCreated(t *testing.T) {
+	for _, harness := range []string{"claude", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			p := nativeTestPaths(t)
+			configPath := nativeTestPath(t, p, harness, "config")
+			settings := map[string]any{"env": map[string]any{"A": "1", "B": "2"}}
+			if harness == "codex" {
+				settings = map[string]any{"mcp_servers": map[string]any{"a": map[string]any{"command": "x"}, "b": map[string]any{"command": "y"}}}
+			}
+			applyNative(t, p, harness, NativeProfile{Settings: settings})
+			nativeTestReset(t, p, harness)
+			nativeTestAbsent(t, configPath)
+		})
+	}
+}
+
+func TestPatchTOMLChangesRootScalarInPlace(t *testing.T) {
+	start := "# top\nmodel = \"gpt-5\" # mine\napproval_policy = \"never\"\n\n[x]\ny = 1\n"
+	out, err := patchTOML(t, start, func(m map[string]any) { m["model"] = "glm-5" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Replace(start, `"gpt-5"`, `"glm-5"`, 1); out != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+	back, err := patchTOML(t, out, func(m map[string]any) { m["model"] = "gpt-5" })
+	if err != nil || back != start {
+		t.Fatalf("round trip = %q, %v", back, err)
+	}
+}
+
+func TestPatchTOMLDottedRootKeysAndCRLF(t *testing.T) {
+	start := "mcp_servers.mine.command = \"a\"\r\nmodel = \"m\"\r\n\r\n[other]\r\nk = 1\r\n"
+	out, err := patchTOML(t, start, func(m map[string]any) {
+		delete(m["mcp_servers"].(map[string]any), "mine")
+		m["mcp_servers"].(map[string]any)["new"] = map[string]any{"command": "b"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "mine") || !strings.Contains(out, "[mcp_servers.new]") || !strings.Contains(out, "[other]\r\nk = 1\r\n") {
+		t.Fatalf("got:\n%q", out)
+	}
+}
+
+func TestOpenCodeMCPServersRejectsBothShapesForOneName(t *testing.T) {
+	cfg := map[string]any{"mcp": map[string]any{
+		"dup":     map[string]any{"type": "remote", "url": "https://a.test"},
+		"servers": map[string]any{"dup": map[string]any{"type": "remote", "url": "https://b.test"}},
+	}}
+	if _, err := openCodeMCPServers(cfg); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("duplicate = %v", err)
+	}
+}
+
+func TestNativeVersionOneStateStillResets(t *testing.T) {
+	p := nativeTestPaths(t)
+	configPath := nativeTestPath(t, p, "codex", "config")
+	nativeTestWrite(t, configPath, []byte("model = \"original\"\n"))
+	applyNative(t, p, "codex", NativeProfile{Settings: map[string]any{"model": "managed"}})
+	statePath := nativeStatePath(p, "codex")
+	b := nativeTestRead(t, statePath)
+	nativeTestWrite(t, statePath, bytes.Replace(b, []byte(`"Version": 2`), []byte(`"Version": 1`), 1))
+	if s, err := loadNativeState(p, "codex"); err != nil || s.Version != 1 {
+		t.Fatalf("v1 state = %v, %v", s.Version, err)
+	}
+	nativeTestReset(t, p, "codex")
+	if got := string(nativeTestRead(t, configPath)); got != "model = \"original\"\n" {
+		t.Fatalf("reset from v1 state = %q", got)
+	}
+	nativeTestWrite(t, statePath, []byte(`{"Version": 3}`))
+	if _, err := loadNativeState(p, "codex"); err == nil || !strings.Contains(err.Error(), "upgrade ocp") {
+		t.Fatalf("future state = %v", err)
 	}
 }
