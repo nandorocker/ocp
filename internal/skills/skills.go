@@ -293,6 +293,11 @@ func subpathDir(root string, entry LockEntry) (string, error) {
 }
 
 func resolve(source, ref string) (string, error) {
+	// ls-remote matches ref names, never object IDs, so a full commit ID is
+	// already resolved; checkout fetches and verifies it.
+	if commitPattern.MatchString(ref) {
+		return ref, nil
+	}
 	args := []string{"ls-remote", source}
 	if ref == "" {
 		args = append(args, "HEAD")

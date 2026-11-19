@@ -268,3 +268,20 @@ func TestPruneCacheRemovesUnreferencedCheckoutsOnly(t *testing.T) {
 	}
 	_ = commit
 }
+
+func TestPrepareLocksFullCommitRef(t *testing.T) {
+	repo, commit := bareRepository(t)
+	source, data := t.TempDir(), t.TempDir()
+	skill := config.Skill{Source: repo, Ref: commit}
+	p, changed, err := prepare(source, data, []config.Skill{skill}, true, func(string) bool { return true })
+	if err != nil || !changed {
+		t.Fatalf("bootstrap commit ref = %v, changed %v", err, changed)
+	}
+	dir, err := p.SkillDir(skill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
