@@ -269,6 +269,9 @@ func (r *Runner) refreshHarnesses(p ocp.Paths, s *ocp.State, d *config.Document,
 			r.c.Warning(warning)
 		}
 	}
+	if !o.preview {
+		skills.PruneCache(s.Source, p.Data)
+	}
 	return nil
 }
 

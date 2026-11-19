@@ -116,7 +116,7 @@ func TestPrepareNativeProfileEffectiveModels(t *testing.T) {
 }
 
 func TestPrepareNativeProfileRejectsUnsupportedBehavior(t *testing.T) {
-	for _, key := range []string{"provider", "providers", "permission", "permissions", "tools", "hooks", "temperature", "agents", "unknown"} {
+	for _, key := range []string{"permission", "permissions", "tools", "hooks", "temperature", "agents", "experimental", "unknown"} {
 		t.Run(key, func(t *testing.T) {
 			_, err := PrepareNativeProfile(t.TempDir(), config.Profile{Config: map[string]any{key: map[string]any{}}}, "codex", "", nil)
 			if err == nil || !strings.Contains(err.Error(), key) {
@@ -143,7 +143,7 @@ func TestPrepareNativeProfileRejectsUnsupportedBehavior(t *testing.T) {
 func TestPrepareNativeProfilePluginWarningsAndDeterminism(t *testing.T) {
 	p := config.Profile{Config: map[string]any{"plugin": []any{"plugin"}, "$schema": "schema"}, Plugins: []string{"other"}}
 	root := t.TempDir()
-	want := []string{"claude: omitted OpenCode config.$schema", "claude: omitted OpenCode config.plugin", "claude: omitted OpenCode plugins"}
+	want := []string{"claude: omitted OpenCode-only config.$schema", "claude: omitted OpenCode-only config.plugin", "claude: omitted OpenCode plugins"}
 	for i := 0; i < 5; i++ {
 		out, err := PrepareNativeProfile(root, p, "claude", "", nil)
 		if err != nil || !reflect.DeepEqual(out.Warnings, want) || len(out.Settings) != 0 {

@@ -199,3 +199,66 @@ func TestNativeModelsRejectForeignFamiliesAndVariants(t *testing.T) {
 		t.Fatalf("legacy model=%q error=%v", model, err)
 	}
 }
+
+func TestHarnessBlocksParseMergeAndValidate(t *testing.T) {
+	dir := t.TempDir()
+	doc := `version: 1
+claude:
+  env:
+    ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+codex:
+  model_provider: zai
+machines:
+  cosmonaut:
+    claude:
+      env:
+        ANTHROPIC_MODEL: glm-local
+profiles:
+  default: {}
+  deep:
+    codex:
+      model_providers:
+        zai: {base_url: "https://p.test/v1", env_key: ZAI_KEY}
+`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := d.ResolveFromDirForMachine(dir, "cosmonaut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Profile{}
+	for _, p := range profiles {
+		byName[p.Name] = p
+	}
+	env := byName["default"].Claude["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != "https://api.z.ai/api/anthropic" || env["ANTHROPIC_MODEL"] != "glm-local" {
+		t.Fatalf("machine overlay not merged: %v", byName["default"].Claude)
+	}
+	if byName["deep"].Codex["model_provider"] != "zai" || byName["deep"].Codex["model_providers"] == nil {
+		t.Fatalf("profile block not merged with root: %v", byName["deep"].Codex)
+	}
+	if _, has := byName["default"].Codex["model_providers"]; has {
+		t.Fatal("profile block leaked into another profile")
+	}
+	for name, bad := range map[string]string{
+		"unknown key":      "claude: {permissions: {}}\n",
+		"null":             "claude: {env: {X: null}}\n",
+		"env secret":       "claude: {env: {ANTHROPIC_AUTH_TOKEN: '{file:~/.k}'}}\n",
+		"builtin provider": "codex: {model_providers: {openai: {base_url: x}}}\n",
+		"chat wire":        "codex: {model_providers: {z: {base_url: x, wire_api: chat}}}\n",
+		"provider secret":  "codex: {model_providers: {z: {base_url: x, http_headers: {K: '{env:K}'}}}}\n",
+		"empty model":      "codex: {model: ''}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, FileName), []byte("version: 1\n"+bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(filepath.Join(dir, FileName)); err == nil {
+			t.Errorf("%s: accepted %q", name, bad)
+		}
+	}
+}

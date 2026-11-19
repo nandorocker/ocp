@@ -213,7 +213,7 @@ ocp apply --harness claude
 ocp reset --harness codex
 ```
 
-Launch each harness normally—no wrapper is needed. Explicit incompatible targets fail before configuration writes; default operations skip incompatible targets and keep their previous setup. New adapters support a conservative subset of settings and agent options; they do not translate permissions, provider configuration, MCP servers, or hooks. See [multi-harness support](docs/multi-harness.md) for syntax, supported content, and safety behavior.
+Launch each harness normally—no wrapper is needed. Explicit incompatible targets fail before configuration writes; default operations skip incompatible targets and keep their previous setup. Instructions, skills, agents and models carry over. MCP servers carry over to Codex, with secrets read at run time rather than written into its config; Claude Code MCP support is coming. Model providers differ per harness, so each harness gets its own `claude:` or `codex:` block for them. Permissions and hooks are not translated. See [multi-harness support](docs/multi-harness.md) for syntax, supported content, and safety behavior.
 
 Run `ocp` or `ocp --help` for the command overview. Use `ocp help <command>` or `ocp <command> --help` for command options and examples.
 

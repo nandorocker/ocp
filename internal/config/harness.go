@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -164,4 +166,120 @@ func nativeModel(model, harness string) bool {
 		return strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4")
 	}
 	return model == "opus" || model == "sonnet" || model == "haiku" || strings.HasPrefix(model, "claude-")
+}
+
+// Native settings blocks. `claude:` and `codex:` carry settings in each
+// harness's own format, for things that differ per harness, such as model
+// providers. Only keys OCP knows how to own safely are accepted.
+var harnessBlockKeys = map[string][]string{
+	"claude": {"apiKeyHelper", "env", "model"},
+	"codex":  {"model", "model_provider", "model_providers", "model_reasoning_effort"},
+}
+
+// codexBuiltinProviders cannot be redefined in Codex.
+var codexBuiltinProviders = map[string]bool{"openai": true, "ollama": true, "lmstudio": true}
+
+var substitutionSyntax = regexp.MustCompile(`\{(env|file):[^}]*\}`)
+
+func harnessBlocks(values map[string]*yaml.Node, label string) (map[string]any, map[string]any, error) {
+	claude, err := harnessBlock(values["claude"], label+"claude", "claude")
+	if err != nil {
+		return nil, nil, err
+	}
+	codex, err := harnessBlock(values["codex"], label+"codex", "codex")
+	if err != nil {
+		return nil, nil, err
+	}
+	return claude, codex, nil
+}
+
+func harnessBlock(node *yaml.Node, label, harness string) (map[string]any, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", label)
+	}
+	value, err := nativeValue(node)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	block := value.(map[string]any)
+	allowed := harnessBlockKeys[harness]
+	for _, key := range sortedKeys(block) {
+		if !slices.Contains(allowed, key) {
+			return nil, fmt.Errorf("%s: unsupported key %q; supported: %s", label, key, strings.Join(allowed, ", "))
+		}
+		v := block[key]
+		if err := rejectNulls(v, label+"."+key); err != nil {
+			return nil, err
+		}
+		switch key {
+		case "apiKeyHelper":
+			// A shell command; {ocp} and substitutions are evaluated by the
+			// `ocp secret` helper it may call, at run time.
+			if s, ok := v.(string); !ok || strings.TrimSpace(s) == "" {
+				return nil, fmt.Errorf("%s.%s must be a non-empty string", label, key)
+			}
+		case "model", "model_provider", "model_reasoning_effort":
+			if s, ok := v.(string); !ok || strings.TrimSpace(s) == "" {
+				return nil, fmt.Errorf("%s.%s must be a non-empty string", label, key)
+			}
+		case "env":
+			env, ok := v.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%s.env must be a mapping of strings", label)
+			}
+			for name, value := range env {
+				s, ok := value.(string)
+				if !ok {
+					return nil, fmt.Errorf("%s.env.%s must be a string", label, name)
+				}
+				if substitutionSyntax.MatchString(s) {
+					return nil, fmt.Errorf("%s.env.%s: {env:} and {file:} are not evaluated here, so the secret would be written into settings.json; set apiKeyHelper: \"{ocp} secret print '%s'\" instead", label, name, s)
+				}
+			}
+		case "model_providers":
+			providers, ok := v.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%s.model_providers must be a mapping", label)
+			}
+			for id, spec := range providers {
+				if codexBuiltinProviders[id] {
+					return nil, fmt.Errorf("%s.model_providers.%s: Codex does not allow redefining the built-in %s provider; choose another id", label, id, id)
+				}
+				fields, ok := spec.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("%s.model_providers.%s must be a mapping", label, id)
+				}
+				if api, set := fields["wire_api"]; set && api != "responses" {
+					return nil, fmt.Errorf("%s.model_providers.%s.wire_api: Codex only supports \"responses\"; put a proxy that speaks the Responses API in front of chat-only providers", label, id)
+				}
+				if substitutionSyntax.MatchString(fmt.Sprint(fields)) {
+					return nil, fmt.Errorf("%s.model_providers.%s: {env:} and {file:} are not evaluated by Codex; use env_key: NAME to read the key from an environment variable", label, id)
+				}
+			}
+		}
+	}
+	return block, nil
+}
+
+func rejectNulls(v any, label string) error {
+	switch v := v.(type) {
+	case nil:
+		return fmt.Errorf("%s must not be null", label)
+	case map[string]any:
+		for k, e := range v {
+			if err := rejectNulls(e, label+"."+k); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, e := range v {
+			if err := rejectNulls(e, label); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

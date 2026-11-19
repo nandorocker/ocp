@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 // Native ownership is deliberately separate from the legacy OpenCode takeover.
@@ -23,7 +22,15 @@ type nativeKey struct {
 	Original       any
 	OriginalExists bool
 	Installed      any
+	// CreatedParent records that OCP created the collection holding this
+	// entry, so reset removes the collection again once it is empty.
+	CreatedParent bool `json:",omitempty"`
 }
+
+// nativeStateVersion 2 adds collection entries (MCP servers, providers, env
+// variables) to owned keys. Version 1 state is a subset and still loads; an
+// older OCP refuses version 2 rather than forgetting what it owns.
+const nativeStateVersion = 2
 
 type nativeFile struct {
 	Data []byte
@@ -140,7 +147,7 @@ func nativeRead(path string) ([]byte, bool, error) {
 }
 
 func loadNativeState(p Paths, harness string) (nativeState, error) {
-	s := nativeState{Version: 1, Files: map[string]nativeFile{}}
+	s := nativeState{Version: nativeStateVersion, Files: map[string]nativeFile{}}
 	if harness != "claude" && harness != "codex" {
 		return s, fmt.Errorf("unknown native harness %q", harness)
 	}
@@ -151,8 +158,8 @@ func loadNativeState(p Paths, harness string) (nativeState, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return s, fmt.Errorf("read %s ownership: %w", harness, err)
 	}
-	if s.Version != 1 {
-		return s, fmt.Errorf("unsupported %s ownership version", harness)
+	if s.Version != 1 && s.Version != nativeStateVersion {
+		return s, fmt.Errorf("unsupported %s ownership version %d; upgrade ocp", harness, s.Version)
 	}
 	return s, nil
 }
@@ -227,10 +234,10 @@ func putKey(m map[string]any, path []string, value any, exists bool) error {
 	return nil
 }
 
-func settingsKeys(settings map[string]any) []nativeKey {
+func settingsKeys(harness string, settings map[string]any) []nativeKey {
 	var result []nativeKey
 	for _, k := range sortedKeys(settings) {
-		if k == "agents" {
+		if nativeCollections[harness][k] {
 			if agents, ok := settings[k].(map[string]any); ok {
 				for _, name := range sortedKeys(agents) {
 					result = append(result, nativeKey{Path: []string{k, name}, Installed: agents[name]})
@@ -290,7 +297,7 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 			return plan, errors.New("Codex AGENTS.override.md would hide the OCP guide; remove the override or omit shared instructions")
 		}
 	}
-	next := nativeState{Version: 1, Profile: profile, Files: map[string]nativeFile{}}
+	next := nativeState{Version: nativeStateVersion, Profile: profile, Files: map[string]nativeFile{}}
 	add := func(key string, after []byte, afterExists bool, mode uint32) error {
 		if !afterExists {
 			after = nil
@@ -349,11 +356,23 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 		if err := putKey(settings, owned.Path, owned.Original, owned.OriginalExists); err != nil {
 			return plan, err
 		}
+		if owned.CreatedParent && len(owned.Path) == 2 {
+			if parent, ok := settings[owned.Path[0]].(map[string]any); ok && len(parent) == 0 {
+				delete(settings, owned.Path[0])
+			}
+		}
 	}
-	for _, owned := range settingsKeys(rendered.Settings) {
+	for _, owned := range settingsKeys(harness, rendered.Settings) {
 		owned.Original, owned.OriginalExists = keyValue(settings, owned.Path)
-		if len(owned.Path) > 1 && owned.Path[0] == "agents" && owned.OriginalExists {
-			return plan, fmt.Errorf("%s agent %q is not owned by OCP", harness, owned.Path[1])
+		if len(owned.Path) == 2 {
+			_, parentExists := settings[owned.Path[0]]
+			owned.CreatedParent = !parentExists
+			// Named entries the user wrote by hand are never replaced; an
+			// identical one is adopted and left in place on reset. Environment
+			// variables are plain settings: overwritten, then restored.
+			if owned.Path[0] != "env" && owned.OriginalExists && !nativeEqual(owned.Original, owned.Installed) {
+				return plan, fmt.Errorf("%s %s %q already exists and is not owned by OCP; remove it or make it identical", harness, owned.Path[0], owned.Path[1])
+			}
 		}
 		if err := putKey(settings, owned.Path, owned.Installed, true); err != nil {
 			return plan, err
@@ -504,105 +523,6 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 
 func nativeHash(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
 
-// Only the two supported top-level string settings are edited. Keep comments,
-// unknown tables, dates, and formatting in the user's TOML byte-for-byte.
-func patchNativeTOML(data []byte, before, after map[string]any) ([]byte, error) {
-	type edit struct {
-		start, end int
-		data       []byte
-	}
-	var edits []edit
-	wanted := map[string]bool{}
-	for k := range before {
-		if !nativeEqual(before[k], after[k]) {
-			wanted[k] = true
-		}
-	}
-	for k := range after {
-		if !nativeEqual(before[k], after[k]) {
-			wanted[k] = true
-		}
-	}
-	for k := range wanted {
-		if k != "model" && k != "model_reasoning_effort" {
-			return nil, fmt.Errorf("unsupported native TOML edit %q", k)
-		}
-	}
-	valueText := func(v any) ([]byte, error) {
-		b, err := toml.Marshal(map[string]any{"value": v})
-		if err != nil {
-			return nil, err
-		}
-		_, text, ok := bytes.Cut(b, []byte("="))
-		if !ok {
-			return nil, errors.New("cannot encode native TOML value")
-		}
-		return bytes.TrimSpace(text), nil
-	}
-	var parser unstable.Parser
-	parser.Reset(data)
-	for parser.NextExpression() {
-		node := parser.Expression()
-		if node.Kind == unstable.Table || node.Kind == unstable.ArrayTable {
-			break
-		}
-		if node.Kind != unstable.KeyValue {
-			continue
-		}
-		keys := node.Key()
-		if !keys.Next() {
-			continue
-		}
-		key := keys.Node()
-		name := string(key.Data)
-		if keys.Next() || !wanted[name] {
-			continue
-		}
-		value := node.Value()
-		if value.Kind != unstable.String {
-			return nil, fmt.Errorf("native setting %q must be a string", name)
-		}
-		start, end := int(value.Raw.Offset), int(value.Raw.Offset+value.Raw.Length)
-		var replacement []byte
-		if v, exists := after[name]; exists {
-			var err error
-			replacement, err = valueText(v)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			start = int(key.Raw.Offset)
-		}
-		edits = append(edits, edit{start, end, replacement})
-		delete(wanted, name)
-	}
-	if err := parser.Error(); err != nil {
-		return nil, err
-	}
-	for _, name := range sortedKeys(wanted) {
-		if value, exists := after[name]; exists {
-			text, err := valueText(value)
-			if err != nil {
-				return nil, err
-			}
-			edits = append(edits, edit{0, 0, append([]byte(name+" = "), append(text, '\n')...)})
-		}
-	}
-	sort.SliceStable(edits, func(i, j int) bool { return edits[i].start > edits[j].start })
-	out := append([]byte(nil), data...)
-	for _, e := range edits {
-		out = append(append(append([]byte(nil), out[:e.start]...), e.data...), out[e.end:]...)
-	}
-	parsed, err := nativeSettings(out, "codex")
-	if err != nil {
-		return nil, err
-	}
-	if !nativeEqual(parsed, after) {
-		return nil, errors.New("native TOML edit could not preserve configuration")
-	}
-	return out, nil
-}
-
 // ApplyNativePlan journals a target update before its first native write.
 // A crash or partial failure can be resumed explicitly, without overwriting a
 // file that has since been changed by the user or the harness.
@@ -682,9 +602,28 @@ func finishNativePlan(p Paths, plan NativeInstallPlan) error {
 			}
 		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
+		} else if strings.HasPrefix(c.Key, "files/") {
+			removeEmptyParents(p, plan.Harness, c.Key, path)
 		}
 	}
 	return os.Remove(nativeStatePath(p, plan.Harness) + ".pending")
+}
+
+// removeEmptyParents removes directories OCP left empty under the harness's
+// skills/ or agents/ folder, such as a removed skill's own folder. Removing a
+// non-empty directory fails, so nothing else is touched.
+func removeEmptyParents(p Paths, harness, key, path string) {
+	top, _, _ := strings.Cut(strings.TrimPrefix(key, "files/"), "/")
+	probe, err := nativePath(p, harness, "files/"+top+"/x")
+	if err != nil {
+		return
+	}
+	base := filepath.Dir(probe)
+	for dir := filepath.Dir(path); dir != base && strings.HasPrefix(dir, base+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		if os.Remove(dir) != nil {
+			return
+		}
+	}
 }
 
 func RecoverNative(p Paths, harness string) error {

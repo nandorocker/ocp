@@ -171,6 +171,7 @@ func TestNativeInstallPreservesUnrelatedAndResetRestoresModel(t *testing.T) {
 			for rel := range rendered.Files {
 				nativeTestAbsent(t, nativeTestPath(t, p, harness, "files/"+rel))
 			}
+			nativeTestAbsent(t, filepath.Dir(nativeTestPath(t, p, harness, "files/skills/check/SKILL.md")))
 			if got := string(nativeTestRead(t, unrelated)); got != "personal" {
 				t.Errorf("unrelated agent = %q", got)
 			}

@@ -75,7 +75,9 @@ type Runner struct {
 	Paths    func() (ocp.Paths, error)
 	Getwd    func() (string, error)
 	Exec     func(string, []string, []string) error
-	c        *color.Writer
+	// ExecReplace replaces the process (ocp secret exec); tests inject it.
+	ExecReplace func(command, env []string) error
+	c           *color.Writer
 }
 
 func (r *Runner) defaults() {
@@ -156,6 +158,11 @@ func (r *Runner) Run(args []string) error {
 	}
 	if strings.HasPrefix(args[0], "-") {
 		return usageError(fmt.Errorf("unknown global option %q", args[0]))
+	}
+	if args[0] == "secret" {
+		// Hidden: called by harness configuration at run time. It must not
+		// depend on OCP paths, state or configuration.
+		return r.secret(args[1:])
 	}
 	if commandByName(args[0]) == nil {
 		return unknownCommand(args[0])

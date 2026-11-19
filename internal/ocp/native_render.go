@@ -57,8 +57,11 @@ func PrepareNativeProfile(source string, p config.Profile, harness, machine stri
 				out.Settings[key] = model
 			}
 		case "agent": // Translated below, including config-only agents.
-		case "plugin", "$schema":
-			out.Warnings = append(out.Warnings, fmt.Sprintf("%s: omitted OpenCode config.%s", harness, key))
+		case "mcp": // Translated below.
+		case "plugin", "plugins", "$schema", "provider", "providers", "compaction", "theme", "autoupdate", "share", "keybinds", "tui", "formatter", "lsp", "small_model", "username", "layout", "snapshot", "watcher":
+			// These only shape OpenCode itself. Providers for other harnesses
+			// go in that harness's own block (claude: or codex:).
+			out.Warnings = append(out.Warnings, fmt.Sprintf("%s: omitted OpenCode-only config.%s", harness, key))
 		case "model_reasoning_effort":
 			if harness != "codex" {
 				return NativeProfile{}, fmt.Errorf("config.%s is unsupported for %s", key, harness)
@@ -79,6 +82,36 @@ func PrepareNativeProfile(source string, p config.Profile, harness, machine stri
 	}
 	if len(p.Plugins) > 0 {
 		out.Warnings = append(out.Warnings, harness+": omitted OpenCode plugins")
+	}
+	if len(p.FilesDirs) > 0 {
+		out.Warnings = append(out.Warnings, harness+": omitted the profile's files/ directory, which is rendered for OpenCode only")
+	}
+	servers, err := openCodeMCPServers(p.Config)
+	if err != nil {
+		return NativeProfile{}, err
+	}
+	for _, server := range servers {
+		if harness == "claude" {
+			out.Warnings = append(out.Warnings, fmt.Sprintf("claude: MCP server %q not installed; OCP does not manage Claude Code MCP servers yet", server.Name))
+			continue
+		}
+		native, warning, err := codexMCPServer(server, source)
+		if err != nil {
+			return NativeProfile{}, err
+		}
+		if warning != "" {
+			out.Warnings = append(out.Warnings, "codex: "+warning)
+			continue
+		}
+		mcp, _ := out.Settings["mcp_servers"].(map[string]any)
+		if mcp == nil {
+			mcp = map[string]any{}
+			out.Settings["mcp_servers"] = mcp
+		}
+		mcp[server.Name] = native
+	}
+	if err := mergeHarnessBlock(out.Settings, harness, p); err != nil {
+		return NativeProfile{}, err
 	}
 	baseAgents := map[string]any{}
 	if value, exists := p.Config["agent"]; exists {

@@ -77,13 +77,65 @@ Model compatibility covers representation, not account access, model availabilit
 - Untargeted incompatible destinations are visibly skipped, preserving their files and previous selection. If all targets are skipped, the command fails.
 - One incompatible effective agent model rejects the entire profile for that target.
 - `ocp list` shows compatibility and selections when `harnesses` is declared. `ocp status` includes installed native selections.
-- `ocp sync` and the UI's apply operation honor configured destinations. The UI remains OpenCode-focused; YAML is the multi-harness authoring surface.
+- `ocp sync` honors configured destinations.
 
-## Initial adapter scope
+## What carries over
 
-Supported shared content includes instruction files, profile guides, host instructions, portable skills, and agent bodies/descriptions/models. The initial agent adapter accepts `name`, `description`, `model`, `prompt` for config-only agents, and `mode: subagent` or `all`. Other options are rejected, not silently weakened.
+Supported shared content includes instruction files, profile guides, host instructions, portable skills, MCP servers (Codex only, for now), and agent bodies/descriptions/models. The agent adapter accepts `name`, `description`, `model`, `prompt` for config-only agents, and `mode: subagent` or `all`. Other options are rejected, not silently weakened.
 
-The native root settings adapter supports `model`, plus Codex's `model_reasoning_effort`. OpenCode plugins and `$schema` are omitted elsewhere with warnings. Other native OpenCode settings, including permissions, providers, tools, MCP, and hooks, make the profile unavailable to adapters that cannot represent them. OpenCode's existing renderer retains its native configuration support.
+From `config:`, the native adapters translate `model`, Codex's `model_reasoning_effort` and `mcp`. Settings that only shape OpenCode itself are omitted with a warning: `provider`, `providers`, `plugin`, `plugins`, `$schema`, `compaction`, `theme`, `autoupdate`, `share`, `keybinds`, `tui`, `formatter`, `lsp`, `small_model`, `username`, `layout`, `snapshot` and `watcher`. A profile's `files/` directory is OpenCode-only too. Anything else, such as `permission`, `tools`, `hooks` or `experimental`, would change behaviour if dropped, so it makes the profile unavailable for Claude Code and Codex.
+
+## MCP servers
+
+OCP reads MCP servers from `config.mcp`, in either OpenCode shape (`mcp.servers.<name>` or the older `mcp.<name>`), after root, profile and machine overlays are merged. Disabled servers are left out.
+
+- **Codex:** each server becomes an `[mcp_servers.<name>]` table in `~/.codex/config.toml`.
+- **Claude Code:** not installed yet. Claude Code keeps user MCP servers in `~/.claude.json` next to its account state, so OCP will install them through `claude mcp add-json` in a follow-up. Until then each server is listed as a warning.
+
+Secrets are never written into native files:
+
+| OpenCode value | Codex |
+|---|---|
+| `{env:NAME}` as a whole environment value, same name | `env_vars = ["NAME"]` (Codex forwards it) |
+| `{env:NAME}` as a whole header value | `env_http_headers` |
+| `Authorization: Bearer {env:NAME}` | `bearer_token_env_var` |
+| `{file:path}` (or any other template) in an environment value | the server runs through `ocp secret exec`, which reads the file when the server starts |
+| `{file:path}` in a header, or any template in the command or url | server skipped with a warning |
+
+`ocp secret exec` is called by its absolute path, so keep `ocp` installed where it is; reinstalling it elsewhere means running `ocp apply` again. Relative `{file:}` paths are made absolute against the OCP source; `~/` is expanded when the secret is read.
+
+An `[mcp_servers.<name>]` table you wrote yourself is never replaced. If it is identical to what OCP would write, OCP adopts it and leaves it in place on reset; otherwise `apply` stops and names it.
+
+## Providers and other native settings
+
+Model providers work differently in each harness: Claude Code talks to an Anthropic-compatible endpoint, Codex to an OpenAI Responses endpoint, OpenCode to almost anything. So OCP does not translate `config.provider`. Each harness gets its own block, in its own format, at the root, in a profile or in a `machines.<name>` overlay. Blocks merge like `config:`, later layers winning.
+
+```yaml
+config:
+  model:
+    opencode: zai/glm-5.1
+    claude: glm-5.1
+    codex: gpt-5.5
+claude:
+  env:
+    ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  apiKeyHelper: "{ocp} secret print '{file:~/.config/zai/key}'"
+codex:
+  model_provider: myproxy
+  model_providers:
+    myproxy:
+      name: My Responses proxy
+      base_url: http://127.0.0.1:4000/v1
+      env_key: MYPROXY_KEY
+```
+
+- **`claude:`** accepts `env`, `apiKeyHelper` and `model`; they go to `~/.claude/settings.json`. `env` variables are owned one by one, so variables you set yourself stay.
+- **`codex:`** accepts `model`, `model_provider`, `model_providers` and `model_reasoning_effort`; they go to `~/.codex/config.toml`. Codex only speaks the Responses API (`wire_api = "responses"`), which many GLM, Kimi and DeepSeek endpoints do not offer; put a proxy that does in front of them. The built-in `openai`, `ollama` and `lmstudio` providers cannot be redefined.
+- **Secrets:** `{env:}` and `{file:}` are rejected inside these blocks, because the value would be written as is. For Claude Code use `apiKeyHelper` with `{ocp} secret print '<template>'`; `{ocp}` becomes the quoted path of the `ocp` binary. For Codex use `env_key`.
+- **Collisions:** a key set both in a block and through `config:` (for example `model`) is an error. Set it in one place.
+- `null` is not accepted anywhere in a block.
+
+Every machine that syncs a source using `claude:` or `codex:` blocks needs an `ocp` build that understands them; older builds reject the unknown keys. Upgrade OCP on all machines first.
 
 Skills need standard `name` and `description` frontmatter for native installation. Codex rejects unsupported skill extensions rather than ignoring invocation controls or execution semantics. Skill prose can still refer to harness-specific tools; OCP does not rewrite it.
 
@@ -97,7 +149,7 @@ Codex output uses `~/.codex/config.toml`, a bounded block in `~/.codex/AGENTS.md
 
 OCP preserves unrelated settings and guide text. Codex TOML edits preserve unrelated comments and formatting; Claude JSON may be reformatted. Existing values of owned settings are recorded for reset. Unmanaged generated-file collisions, edited owned content, and destination symlinks are refused. Credentials, runtime state, history, and entire native home directories are not taken over. Custom `CLAUDE_CONFIG_DIR`/`CODEX_HOME` environments are currently refused rather than installing into the wrong location.
 
-Each native target has separate ownership records. OpenCode activation in multi-harness mode is pinned to an immutable release, so updates of another target cannot change a skipped OpenCode setup.
+Each native target has separate ownership records, stored as version 2. An older OCP refuses them rather than forgetting what it owns. OpenCode activation in multi-harness mode is pinned to an immutable release, so updates of another target cannot change a skipped OpenCode setup.
 
 ```sh
 ocp apply --preview
