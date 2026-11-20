@@ -930,8 +930,9 @@ func (r *Runner) list(p ocp.Paths, args []string) error {
 			if e != nil {
 				return e
 			}
+			estimates := contextEstimates(p, s.Source, doc, s.Machine)
 			for _, profile := range profiles {
-				fmt.Fprintln(r.Out, profile.Name)
+				fmt.Fprintln(r.Out, profile.Name+r.tokenSuffix(estimates, profile.Name))
 				for _, h := range doc.EnabledHarnesses() {
 					var reason error
 					if h == "opencode" {
@@ -969,14 +970,29 @@ func (r *Runner) list(p ocp.Paths, args []string) error {
 		return e
 	}
 	active, _ := ocp.ActiveProfile(p)
+	estimates := map[string]ocp.ContextEstimate{}
+	if s, e := sourceState(p); e == nil {
+		if doc, e := sourceDocument(s); e == nil {
+			estimates = contextEstimates(p, s.Source, doc, s.Machine)
+		}
+	}
 	for _, n := range names {
 		mark := " "
 		if n == active {
 			mark = "*"
 		}
-		fmt.Fprintf(r.Out, "%s %s\n", mark, n)
+		fmt.Fprintf(r.Out, "%s %s%s\n", mark, n, r.tokenSuffix(estimates, n))
 	}
 	return nil
+}
+
+// tokenSuffix is the context estimate shown after a profile name in lists.
+func (r *Runner) tokenSuffix(estimates map[string]ocp.ContextEstimate, name string) string {
+	est, ok := estimates[name]
+	if !ok || est.Tokens == 0 {
+		return ""
+	}
+	return "  " + r.c.Style(color.ANSIDim, "~"+ocp.FormatTokens(est.Tokens)+" tokens")
 }
 func (r *Runner) status(p ocp.Paths, args []string) error {
 	if e := parse("status", args, func(*flag.FlagSet) {}); e != nil {

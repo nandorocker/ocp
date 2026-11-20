@@ -93,7 +93,7 @@ func TestShowOverviewPlainListsOnlyWhatEachProfileAdds(t *testing.T) {
 		"machines   cosmonaut, windy\n",
 		"-- default\n",
 		"-- lab (cosmonaut only)\n",
-		"-- router\n",
+		"-- router  ~4 tokens\n",
 		"model     vendor/router *\n",
 		"skills    shared*  own-skill\n",
 		"plugins   npm-plugin\n",
@@ -626,5 +626,35 @@ func TestShowReportsMachinesThatDoNotResolveAsWarnings(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "! machine cosmonaut does not resolve") {
 		t.Errorf("expected a warning:\n%s", out.String())
+	}
+}
+
+func TestShowContextEstimate(t *testing.T) {
+	files := map[string]string{
+		"ocp.yaml":            "version: 1\ninstructions: [AGENTS.md]\nskills: [big]\nconfig:\n  mcp:\n    servers:\n      pw: {type: local, command: [npx, pw]}\n",
+		"AGENTS.md":           strings.Repeat("a", 4000),
+		"skills/big/SKILL.md": "---\nname: big\ndescription: " + strings.Repeat("d", 400) + "\n---\n" + strings.Repeat("b", 8000),
+	}
+	_, r, out := showSetup(t, "windy", files)
+	if err := r.Run([]string{"show", "default"}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"context  ~1.1k tokens before the first prompt (estimate)\n",
+		"  instructions   1  1k\n",
+		"  skills         1  102\n",
+		"  skill bodies ~2k load when used, 1 MCP server not measured\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	out.Reset()
+	if err := r.Run([]string{"show", "--json", "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"tokens": 1102`) || !strings.Contains(out.String(), `"mcp_servers": 1`) {
+		t.Errorf("json missing context:\n%s", out.String())
 	}
 }

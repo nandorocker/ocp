@@ -240,6 +240,7 @@ ocp reset
 - **Sources:** Git skills show just their repository, since Git is the default. Other sources are labelled `local`, `npm`, `path`, `remote` or `stdio`. MCP servers appear by name and type only; settings, headers and secrets are never printed, and credentials embedded in Git URLs are stripped.
 - **Width:** name lists in the tree are fitted to the terminal (`COLUMNS` when piped) and end in `+ N others`. In the detail view, more than eight skills are grouped by repository unless you pass `--all`.
 - **Warnings:** local skill folders and plugin files that no profile references are listed under the tree. A clean configuration prints nothing extra.
+- **Context cost:** each profile shows roughly how many tokens it loads before the first prompt on this machine: instructions (including the host file), skill names and descriptions, and agent descriptions. `ocp show <profile>` breaks it down and notes what loads later (skill bodies) or isn't measured (MCP tool definitions, which come from running the servers). `ocp list` shows the same total. Estimates are characters ÷ 4, not a specific model's tokenizer, and Git skills that are not cached yet are listed as not measured.
 - **Plain output:** piped output and `NO_COLOR` produce ASCII with no escapes. `--json` prints the same data for scripts.
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
