@@ -91,3 +91,30 @@ func TestPluginName(t *testing.T) {
 		}
 	}
 }
+
+func TestDisabledByAncestorStillMatchesInDescendants(t *testing.T) {
+	dir := t.TempDir()
+	doc := "version: 1\nskills: [a, b]\ndisabled: [a]\nprofiles:\n  default: {}\n  child:\n    extends: default\n    disabled: [b]\n"
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := d.ResolveFromDirForMachine(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range profiles {
+		if len(p.UnmatchedDisabled) != 0 {
+			t.Errorf("%s: false unmatched %v", p.Name, p.UnmatchedDisabled)
+		}
+		if p.Name == "child" && len(p.Skills) != 0 {
+			t.Errorf("child skills = %v", p.Skills)
+		}
+		if p.Name == "default" && (len(p.Skills) != 1 || p.Skills[0].Source != "b") {
+			t.Errorf("default skills = %v", p.Skills)
+		}
+	}
+}

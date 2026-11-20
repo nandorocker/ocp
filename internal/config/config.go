@@ -197,9 +197,7 @@ func compositionFromOverlay(o MachineOverlay) composition {
 	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil, nil, o.Claude, o.Codex, o.Disabled}
 }
 func resolved(name string, c composition) Profile {
-	p := Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...), cloneMap(c.claude), cloneMap(c.codex), append([]string(nil), c.disabled...), nil}
-	applyDisabled(&p)
-	return p
+	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...), cloneMap(c.claude), cloneMap(c.codex), append([]string(nil), c.disabled...), nil}
 }
 
 func mergeComposition(base, child composition) composition {
@@ -849,6 +847,11 @@ func resolveProfiles(rootDoc *Document, fileProfiles map[string]ProfileSpec, mac
 		if machine != "" && !available[name] {
 			continue
 		}
+		// Children inherit their parent's unfiltered lists, so disabled
+		// entries apply once, here, and a name disabled by an ancestor
+		// still matches in every descendant.
+		profile.Config = cloneMap(profile.Config)
+		applyDisabled(&profile)
 		profiles = append(profiles, profile)
 	}
 	return profiles, nil
