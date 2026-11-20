@@ -43,7 +43,17 @@ func TestSecretPrintAndExec(t *testing.T) {
 	if !found {
 		t.Fatal("TOKEN not set for the command")
 	}
+	out.Reset()
+	t.Setenv("OCP_TEST_HEADER", "e")
+	if err := r.Run([]string{"secret", "headers", "Authorization=Bearer {file:" + key + "}", "X-Env={env:OCP_TEST_HEADER}"}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != `{"Authorization":"Bearer abc","X-Env":"e"}`+"\n" {
+		t.Fatalf("headers = %q", out.String())
+	}
 	for _, args := range [][]string{
+		{"secret", "headers"},
+		{"secret", "headers", "bad"},
 		{"secret"},
 		{"secret", "print"},
 		{"secret", "exec", "TOKEN=x"},

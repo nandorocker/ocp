@@ -23,6 +23,9 @@ type NativeProfile struct {
 	Skills   map[string]string
 	Guide    []byte
 	Warnings []string
+	// MCP holds Claude Code MCP servers by name, in the JSON form
+	// `claude mcp add-json` stores. Codex servers are part of Settings.
+	MCP map[string]any
 }
 
 // PrepareNativeProfile translates only settings whose native meaning is known.
@@ -93,7 +96,18 @@ func PrepareNativeProfile(source string, p config.Profile, harness, machine stri
 	}
 	for _, server := range servers {
 		if harness == "claude" {
-			out.Warnings = append(out.Warnings, fmt.Sprintf("claude: MCP server %q not installed; OCP does not manage Claude Code MCP servers yet", server.Name))
+			native, warning, err := claudeMCPServer(server, source)
+			if err != nil {
+				return NativeProfile{}, err
+			}
+			if warning != "" {
+				out.Warnings = append(out.Warnings, "claude: "+warning)
+				continue
+			}
+			if out.MCP == nil {
+				out.MCP = map[string]any{}
+			}
+			out.MCP[server.Name] = native
 			continue
 		}
 		native, warning, err := codexMCPServer(server, source)
@@ -113,6 +127,11 @@ func PrepareNativeProfile(source string, p config.Profile, harness, machine stri
 	}
 	if err := mergeHarnessBlock(out.Settings, harness, p); err != nil {
 		return NativeProfile{}, err
+	}
+	if len(out.MCP) > 0 {
+		if _, err := claudeCommand(); err != nil {
+			return NativeProfile{}, fmt.Errorf("installing MCP servers into Claude Code needs the claude command: %w", err)
+		}
 	}
 	baseAgents := map[string]any{}
 	if value, exists := p.Config["agent"]; exists {

@@ -49,6 +49,25 @@ type nativeState struct {
 	EmptyConfigData       []byte
 	ConfigInstalledHash   string
 	ConfigHasExternalText bool
+	// MCP records the Claude Code MCP servers OCP installed, by name.
+	MCP map[string]nativeMCP `json:",omitempty"`
+}
+
+// nativeMCP is one owned Claude Code MCP server. Original is what was there
+// before OCP: an identical hand-made entry is adopted and put back on reset.
+type nativeMCP struct {
+	Installed      any
+	Original       any  `json:",omitempty"`
+	OriginalExists bool `json:",omitempty"`
+}
+
+// nativeMCPOp changes one server in ~/.claude.json through the claude CLI:
+// remove the current entry if there is one, then add Add unless it is nil.
+// Each operation is idempotent and checked by reading the file back.
+type nativeMCPOp struct {
+	Name   string
+	Remove bool `json:",omitempty"`
+	Add    any  `json:",omitempty"`
 }
 
 type nativeChange struct {
@@ -64,6 +83,7 @@ type nativeChange struct {
 type NativeInstallPlan struct {
 	Harness string
 	Changes []nativeChange
+	MCP     []nativeMCPOp `json:",omitempty"`
 }
 
 func nativeStatePath(p Paths, harness string) string {
@@ -522,6 +542,11 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 			return plan, err
 		}
 	}
+	if harness == "claude" {
+		if plan.MCP, next.MCP, err = planClaudeMCP(p, old.MCP, rendered.MCP); err != nil {
+			return plan, err
+		}
+	}
 	stateData, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return plan, err
@@ -602,19 +627,41 @@ func finishNativePlan(p Paths, plan NativeInstallPlan) error {
 			return err
 		}
 	}
-	for _, c := range plan.Changes {
+	write := func(c nativeChange) error {
 		if err := checkNativeChange(p, plan.Harness, c, true); err != nil {
 			return err
 		}
 		path, _ := nativePath(p, plan.Harness, c.Key)
 		if c.AfterExists {
-			if err := atomicFile(path, c.After, os.FileMode(c.Mode)); err != nil {
+			return atomicFile(path, c.After, os.FileMode(c.Mode))
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if strings.HasPrefix(c.Key, "files/") {
+			removeEmptyParents(p, plan.Harness, c.Key, path)
+		}
+		return nil
+	}
+	// Ownership state is written last, after MCP servers are confirmed, so
+	// an interruption never records a server that is not installed.
+	for _, c := range plan.Changes {
+		if c.Key != "state" {
+			if err := write(c); err != nil {
 				return err
 			}
-		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		} else if strings.HasPrefix(c.Key, "files/") {
-			removeEmptyParents(p, plan.Harness, c.Key, path)
+		}
+	}
+	for _, op := range plan.MCP {
+		if err := applyClaudeMCP(p, op); err != nil {
+			return fmt.Errorf("claude MCP server %q: %w", op.Name, err)
+		}
+	}
+	for _, c := range plan.Changes {
+		if c.Key == "state" {
+			if err := write(c); err != nil {
+				return err
+			}
 		}
 	}
 	return os.Remove(nativeStatePath(p, plan.Harness) + ".pending")

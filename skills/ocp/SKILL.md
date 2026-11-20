@@ -51,7 +51,7 @@ skills:
 
 `ocp apply` locks a new Git skill to a commit in `ocp.lock`, which needs network access. `ocp.lock` is part of the source: commit it, or let `ocp sync` do so.
 
-**MCP servers** use OpenCode's format under `config`. OCP translates them for Codex. It does not install any of them into Claude Code yet, and prints one warning per server on every apply; that warning is expected.
+**MCP servers** use OpenCode's format under `config`. OCP translates them for Claude Code (through the `claude` command, which must be on PATH) and for Codex.
 
 ```yaml
 config:

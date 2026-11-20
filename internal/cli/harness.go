@@ -251,6 +251,9 @@ func (r *Runner) refreshHarnesses(p ocp.Paths, s *ocp.State, d *config.Document,
 			for _, change := range item.plan.Changes {
 				fmt.Fprintf(r.Out, "  %s\n", change.Key)
 			}
+			for _, op := range item.plan.MCPChanges() {
+				fmt.Fprintf(r.Out, "  mcp %s\n", op)
+			}
 			for _, warning := range item.rendered.Warnings {
 				r.c.Warning(warning)
 			}

@@ -81,7 +81,7 @@ Model compatibility covers representation, not account access, model availabilit
 
 ## What carries over
 
-Supported shared content includes instruction files, profile guides, host instructions, portable skills, MCP servers (Codex only, for now), and agent bodies/descriptions/models. The agent adapter accepts `name`, `description`, `model`, `prompt` for config-only agents, and `mode: subagent` or `all`. Other options are rejected, not silently weakened.
+Supported shared content includes instruction files, profile guides, host instructions, portable skills, MCP servers, and agent bodies/descriptions/models. The agent adapter accepts `name`, `description`, `model`, `prompt` for config-only agents, and `mode: subagent` or `all`. Other options are rejected, not silently weakened.
 
 From `config:`, the native adapters translate `model`, Codex's `model_reasoning_effort` and `mcp`. Settings that only shape OpenCode itself are omitted with a warning: `provider`, `providers`, `plugin`, `plugins`, `$schema`, `compaction`, `theme`, `autoupdate`, `share`, `keybinds`, `tui`, `formatter`, `lsp`, `small_model`, `username`, `layout`, `snapshot` and `watcher`. A profile's `files/` directory is OpenCode-only too. Anything else, such as `permission`, `tools`, `hooks` or `experimental`, would change behaviour if dropped, so it makes the profile unavailable for Claude Code and Codex.
 
@@ -90,17 +90,18 @@ From `config:`, the native adapters translate `model`, Codex's `model_reasoning_
 OCP reads MCP servers from `config.mcp`, in either OpenCode shape (`mcp.servers.<name>` or the older `mcp.<name>`), after root, profile and machine overlays are merged. Disabled servers are left out.
 
 - **Codex:** each server becomes an `[mcp_servers.<name>]` table in `~/.codex/config.toml`.
-- **Claude Code:** not installed yet. Claude Code keeps user MCP servers in `~/.claude.json` next to its account state, so OCP will install them through `claude mcp add-json` in a follow-up. Until then each server is listed as a warning.
+- **Claude Code:** each server is added with `claude mcp add-json -s user` and removed with `claude mcp remove -s user`. OCP never writes `~/.claude.json` itself, because Claude keeps account state there and rewrites it constantly; it only reads the file to confirm each change. The `claude` command must be on PATH, otherwise the profile is unavailable for Claude Code. Each add or remove is journaled, and an interrupted apply resumes with `ocp apply --recover --harness claude`.
 
 Secrets are never written into native files:
 
-| OpenCode value | Codex |
-|---|---|
-| `{env:NAME}` as a whole environment value, same name | `env_vars = ["NAME"]` (Codex forwards it) |
-| `{env:NAME}` as a whole header value | `env_http_headers` |
-| `Authorization: Bearer {env:NAME}` | `bearer_token_env_var` |
-| `{file:path}` (or any other template) in an environment value | the server runs through `ocp secret exec`, which reads the file when the server starts |
-| `{file:path}` in a header, or any template in the command or url | server skipped with a warning |
+| OpenCode value | Claude Code | Codex |
+|---|---|---|
+| `{env:NAME}` in an environment value | `${NAME}` (Claude expands it) | `env_vars = ["NAME"]` when the name matches; otherwise through `ocp secret exec` |
+| `{env:NAME}` in a header | `${NAME}` | `env_http_headers`, or `bearer_token_env_var` for `Authorization: Bearer {env:NAME}` |
+| `{env:NAME}` in a url | `${NAME}` | server skipped with a warning |
+| `{file:path}` in an environment value | the server runs through `ocp secret exec`, which reads the file when the server starts | same |
+| `{file:path}` in a header | `headersHelper` runs `ocp secret headers` when Claude connects | server skipped with a warning |
+| `{file:path}` in the command or url | server skipped with a warning | same |
 
 `ocp secret exec` is called by its absolute path, so keep `ocp` installed where it is; reinstalling it elsewhere means running `ocp apply` again. Relative `{file:}` paths are made absolute against the OCP source; `~/` is expanded when the secret is read.
 
