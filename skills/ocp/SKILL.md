@@ -36,6 +36,8 @@ ocp show <profile>       # one profile, readable, with its context cost
 | one machine only | a `machines: { <machine>: {...} }` overlay, at the root or in a profile |
 | profiles that exist on some machines only | `hosts: [<machine>]` on the profile |
 
+A machine overlay only takes effect on that machine. Applying it anywhere else changes nothing; `ocp show` lists it with its machine name, which confirms the change.
+
 The root file, profiles and machine overlays all accept `config`, `claude`, `codex`, `instructions`, `skills`, `plugins` and `agents`. A profile also takes `extends: <parent>`. Unknown keys are errors.
 
 **Skills.** These are listed by name. Folder names do not enable anything.
@@ -47,7 +49,9 @@ skills:
   - github:owner/repo//skills/pdf@v1.2     # pinned to a tag or commit
 ```
 
-**MCP servers** use OpenCode's format under `config`. OCP translates them for Codex. It does not install them into Claude Code yet; it prints a warning per server instead.
+`ocp apply` locks a new Git skill to a commit in `ocp.lock`, which needs network access. `ocp.lock` is part of the source: commit it, or let `ocp sync` do so.
+
+**MCP servers** use OpenCode's format under `config`. OCP translates them for Codex. It does not install any of them into Claude Code yet, and prints one warning per server on every apply; that warning is expected.
 
 ```yaml
 config:
@@ -65,7 +69,7 @@ config:
 
 **Secrets.** Never write a key or token into the source. Use `{env:NAME}` or `{file:~/path}`, and OCP reads it when it is needed.
 
-**Models.** A plain `provider/model` string is used as is by OpenCode, and Claude Code or Codex accept it only for a provider they understand. To set each harness's model explicitly, use a mapping:
+**Models.** Set models in `config.model`, never in `claude:` or `codex:` as well (setting both is an error). A plain `provider/model` string is used as is by OpenCode, and Claude Code or Codex accept it only for a provider they understand. To set each harness's model explicitly, use a mapping:
 
 ```yaml
 config:

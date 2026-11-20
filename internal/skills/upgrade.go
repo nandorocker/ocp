@@ -107,7 +107,7 @@ func planUpgrade(sourceDir, dataDir string, skills []config.Skill, name string, 
 	}
 	original, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("Git skills are not locked yet; run `ocp sync` first")
+		return nil, fmt.Errorf("Git skills are not locked yet; run `ocp apply` first")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read skill lock: %w", err)
@@ -121,10 +121,10 @@ func planUpgrade(sourceDir, dataDir string, skills []config.Skill, name string, 
 		s := byKey[key]
 		entry, ok := lock.Skills[key]
 		if !ok {
-			return nil, fmt.Errorf("Git skill %q is not in %s yet; run `ocp sync` first", s.Name(), lockFileName)
+			return nil, fmt.Errorf("Git skill %q is not in %s yet; run `ocp apply` first", s.Name(), lockFileName)
 		}
 		if entry.Ref != s.Ref {
-			return nil, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp sync` first", s.Name(), s.Ref, entry.Ref)
+			return nil, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp apply` first", s.Name(), s.Ref, entry.Ref)
 		}
 		result := UpgradeResult{Name: s.Name(), Source: s.Source, Path: s.Path, Ref: s.Ref, Old: entry.Commit, New: entry.Commit, Status: Current}
 		commit, kind, err := lookupRef(s.Source, s.Ref)
@@ -135,7 +135,7 @@ func planUpgrade(sourceDir, dataDir string, skills []config.Skill, name string, 
 			result.Status, result.Note = Skipped, err.Error()
 		} else if kind != refBranch {
 			if name != "" {
-				return nil, fmt.Errorf("Git skill %q is pinned to %q; change its ref in the source and run `ocp sync` to move it", s.Name(), s.Ref)
+				return nil, fmt.Errorf("Git skill %q is pinned to %q; change its ref in the source and run `ocp apply` to move it", s.Name(), s.Ref)
 			}
 			result.Status = Pinned
 		} else if commit != entry.Commit {

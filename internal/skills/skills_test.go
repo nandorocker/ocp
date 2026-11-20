@@ -29,7 +29,7 @@ func TestReadLockRejectsMalformedAndInvalidEntries(t *testing.T) {
 func TestPrepareMissingEntryPolicyAndRefMismatch(t *testing.T) {
 	source, data := t.TempDir(), t.TempDir()
 	skill := config.Skill{Source: "https://example.test/org/demo.git", Ref: "v1"}
-	if _, _, err := Prepare(source, data, []config.Skill{skill}, false); err == nil || !strings.Contains(err.Error(), "require") {
+	if _, _, err := Prepare(source, data, []config.Skill{skill}, false); err == nil || !strings.Contains(err.Error(), "not locked") {
 		t.Fatalf("missing lock error = %v", err)
 	}
 	commit := strings.Repeat("a", 40)

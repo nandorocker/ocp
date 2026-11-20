@@ -256,7 +256,7 @@ ocp reset
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
 
-Git-backed skills are locked to a commit in `ocp.lock` during setup or sync, so every machine renders the same files. `ocp upgrade` moves skills that follow a branch (no `@ref`, or a branch name) to the branch's latest commit, updates `ocp.lock` and re-renders. Skills pinned to a tag or a full commit ID never move; to move one, change its ref in the source and run `ocp sync`, which locks the new ref. `ocp upgrade skill <name>` upgrades one skill and `--preview` shows the changes without writing anything. If re-rendering fails, for example because of drift, `ocp.lock` is put back as it was. Run `ocp sync` afterwards to commit the new lock and share it.
+Git-backed skills are locked to a commit in `ocp.lock` the first time `ocp setup`, `ocp apply` or `ocp sync` sees them, so every machine renders the same files. `ocp upgrade` moves skills that follow a branch (no `@ref`, or a branch name) to the branch's latest commit, updates `ocp.lock` and re-renders. Skills pinned to a tag or a full commit ID never move; to move one, change its ref in the source and run `ocp apply`, which locks the new ref. `ocp upgrade skill <name>` upgrades one skill and `--preview` shows the changes without writing anything. If re-rendering fails, for example because of drift, `ocp.lock` is put back as it was. Run `ocp sync` afterwards to commit the new lock and share it.
 
 See [`docs/PRD.md`](docs/PRD.md) for the product requirements and configuration model.
 

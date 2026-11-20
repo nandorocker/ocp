@@ -96,7 +96,7 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 		return &provider{dataDir: dataDir, entries: nil}, false, nil
 	}
 	if !exists && !allowBootstrap {
-		return nil, false, fmt.Errorf("Git skills require %s; rerun with bootstrap enabled", lockPath)
+		return nil, false, fmt.Errorf("Git skills are not locked in %s yet; run `ocp apply` to lock them", lockPath)
 	}
 	if !exists {
 		lock = Lock{Version: 1, Skills: map[string]LockEntry{}}
@@ -116,9 +116,9 @@ func prepare(sourceDir, dataDir string, skills []config.Skill, allowBootstrap bo
 		}
 		if !allowBootstrap {
 			if ok {
-				return nil, false, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp sync` to lock the new ref", skill.Source, skill.Ref, entry.Ref)
+				return nil, false, fmt.Errorf("Git skill %q ref %q does not match lock ref %q; run `ocp apply` to lock the new ref", skill.Source, skill.Ref, entry.Ref)
 			}
-			return nil, false, fmt.Errorf("Git skill %q has no entry in %s", skill.Source, lockPath)
+			return nil, false, fmt.Errorf("Git skill %q is not locked in %s yet; run `ocp apply` to lock it", skill.Source, lockPath)
 		}
 		// A new declaration, or a changed ref, is resolved and locked.
 		commit, kind, err := lookupRef(skill.Source, skill.Ref)
