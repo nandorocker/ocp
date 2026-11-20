@@ -1,6 +1,7 @@
 package ocp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 func claudeJSONPath(p Paths) string { return filepath.Join(p.Home, ".claude.json") }
@@ -15,9 +17,12 @@ func claudeJSONPath(p Paths) string { return filepath.Join(p.Home, ".claude.json
 // readClaudeServers returns the user-scope MCP servers in ~/.claude.json. It
 // only reads: the file belongs to Claude Code, which rewrites it constantly.
 func readClaudeServers(p Paths) (map[string]any, error) {
-	b, exists, err := nativeRead(claudeJSONPath(p))
-	if err != nil || !exists {
-		return map[string]any{}, err
+	b, err := os.ReadFile(claudeJSONPath(p))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(b, &doc); err != nil {
@@ -30,15 +35,53 @@ func readClaudeServers(p Paths) (map[string]any, error) {
 	return servers, nil
 }
 
+// claudeEquivalent compares a stored server with what OCP wrote, ignoring
+// fields Claude adds with empty values (such as "args": []), so a newer
+// Claude that fills in defaults does not look like an edit.
+func claudeEquivalent(stored, want any) bool {
+	s, ok1 := stored.(map[string]any)
+	w, ok2 := want.(map[string]any)
+	if !ok1 || !ok2 {
+		return nativeEqual(stored, want)
+	}
+	trimmed := map[string]any{}
+	for k, v := range s {
+		if _, wanted := w[k]; !wanted && emptyValue(v) {
+			continue
+		}
+		trimmed[k] = v
+	}
+	return nativeEqual(trimmed, w)
+}
+
+func emptyValue(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case bool:
+		return !v
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
+}
+
 // planClaudeMCP works out the operations that turn the owned servers into
-// the desired ones, and the ownership to record afterwards.
-func planClaudeMCP(p Paths, owned map[string]nativeMCP, desired map[string]any) ([]nativeMCPOp, map[string]nativeMCP, error) {
+// the desired ones, and the ownership to record afterwards. A server OCP
+// owns that the user removed is reinstalled if still wanted and otherwise
+// forgotten; one the user changed blocks an update but is released (with a
+// warning) when no longer wanted, so reset always works.
+func planClaudeMCP(p Paths, owned map[string]nativeMCP, desired map[string]any) ([]nativeMCPOp, map[string]nativeMCP, []string, error) {
 	if len(owned) == 0 && len(desired) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	current, err := readClaudeServers(p)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	names := map[string]bool{}
 	for name := range owned {
@@ -53,46 +96,53 @@ func planClaudeMCP(p Paths, owned map[string]nativeMCP, desired map[string]any) 
 	}
 	sort.Strings(sorted)
 	var ops []nativeMCPOp
+	var warnings []string
 	next := map[string]nativeMCP{}
 	for _, name := range sorted {
 		cur, curExists := current[name]
 		had, wasOwned := owned[name]
 		want, wanted := desired[name]
-		if wasOwned && (!curExists || !nativeEqual(cur, had.Installed)) {
-			return nil, nil, fmt.Errorf("Claude Code MCP server %q was edited outside OCP; restore it or remove it from OCP's state with `ocp reset --harness claude`", name)
-		}
+		edited := wasOwned && curExists && !claudeEquivalent(cur, had.Installed)
 		base, baseExists := cur, curExists
 		if wasOwned {
 			base, baseExists = had.Original, had.OriginalExists
 		}
 		if wanted {
-			if !wasOwned && curExists && !nativeEqual(cur, want) {
-				return nil, nil, fmt.Errorf("Claude Code MCP server %q already exists and is not owned by OCP; remove it (claude mcp remove -s user %s) or make it identical", name, name)
+			switch {
+			case edited:
+				return nil, nil, nil, fmt.Errorf("Claude Code MCP server %q was changed outside OCP; remove it (claude mcp remove -s user %s) and OCP will install its own again", name, name)
+			case !wasOwned && curExists && !claudeEquivalent(cur, want):
+				return nil, nil, nil, fmt.Errorf("Claude Code MCP server %q already exists and is not owned by OCP; remove it (claude mcp remove -s user %s) or make it identical", name, name)
 			}
 			next[name] = nativeMCP{Installed: want, Original: base, OriginalExists: baseExists}
-			if !curExists || !nativeEqual(cur, want) {
-				ops = append(ops, nativeMCPOp{Name: name, Remove: curExists, Add: want})
+			if !curExists || !claudeEquivalent(cur, want) {
+				ops = append(ops, nativeMCPOp{Name: name, Remove: curExists, Before: cur, Add: want})
 			}
 			continue
 		}
 		// Owned before, not wanted now: put back what was there before OCP.
-		if baseExists {
-			if !nativeEqual(cur, base) {
-				ops = append(ops, nativeMCPOp{Name: name, Remove: true, Add: base})
+		switch {
+		case !curExists:
+			// Already gone; nothing to undo.
+		case edited:
+			warnings = append(warnings, fmt.Sprintf("claude: MCP server %q was changed outside OCP; left as it is", name))
+		case baseExists:
+			if !claudeEquivalent(cur, base) {
+				ops = append(ops, nativeMCPOp{Name: name, Remove: true, Before: cur, Add: base})
 			}
-		} else {
-			ops = append(ops, nativeMCPOp{Name: name, Remove: true})
+		default:
+			ops = append(ops, nativeMCPOp{Name: name, Remove: true, Before: cur})
 		}
 	}
 	if len(ops) > 0 {
 		if _, err := claudeCommand(); err != nil {
-			return nil, nil, fmt.Errorf("changing Claude Code MCP servers needs the claude command: %w", err)
+			return nil, nil, nil, fmt.Errorf("changing Claude Code MCP servers needs the claude command: %w", err)
 		}
 	}
 	if len(next) == 0 {
 		next = nil
 	}
-	return ops, next, nil
+	return ops, next, warnings, nil
 }
 
 // applyClaudeMCP performs one operation idempotently, so `ocp apply
@@ -103,12 +153,12 @@ func applyClaudeMCP(p Paths, op nativeMCPOp) error {
 		return err
 	}
 	cur, exists := current[op.Name]
-	if op.Add != nil && exists && nativeEqual(cur, op.Add) {
+	if op.Add != nil && exists && claudeEquivalent(cur, op.Add) {
 		return nil
 	}
 	if exists {
-		if !op.Remove {
-			return errors.New("appeared during the update; refusing to replace it")
+		if !op.Remove || !claudeEquivalent(cur, op.Before) {
+			return errors.New("changed during the update; refusing to replace it")
 		}
 		if err := runClaude(p.Home, "mcp", "remove", "-s", "user", op.Name); err != nil {
 			return err
@@ -133,7 +183,7 @@ func applyClaudeMCP(p Paths, op nativeMCPOp) error {
 	switch {
 	case op.Add == nil && present:
 		return errors.New("still present after removal")
-	case op.Add != nil && (!present || !nativeEqual(got, op.Add)):
+	case op.Add != nil && (!present || !claudeEquivalent(got, op.Add)):
 		return fmt.Errorf("Claude stored a different value than OCP wrote: %v", got)
 	}
 	return nil
@@ -146,7 +196,9 @@ var runClaude = func(home string, args ...string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(path, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(os.Environ(), "HOME="+home, "DISABLE_AUTOUPDATER=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("claude %s: %w: %s", args[1], err, out)

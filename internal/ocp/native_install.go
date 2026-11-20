@@ -27,10 +27,11 @@ type nativeKey struct {
 	CreatedParent bool `json:",omitempty"`
 }
 
-// nativeStateVersion 2 adds collection entries (MCP servers, providers, env
-// variables) to owned keys. Version 1 state is a subset and still loads; an
-// older OCP refuses version 2 rather than forgetting what it owns.
-const nativeStateVersion = 2
+// nativeStateVersion 2 added collection entries (MCP servers, providers, env
+// variables) to owned keys; 3 adds Claude Code MCP servers. Older versions
+// are subsets and still load; an older OCP refuses a newer version rather
+// than forgetting what it owns.
+const nativeStateVersion = 3
 
 type nativeFile struct {
 	Data []byte
@@ -67,7 +68,10 @@ type nativeMCP struct {
 type nativeMCPOp struct {
 	Name   string
 	Remove bool `json:",omitempty"`
-	Add    any  `json:",omitempty"`
+	// Before is the entry expected in place of Name when Remove is set, so a
+	// replayed operation never removes something the user changed since.
+	Before any `json:",omitempty"`
+	Add    any `json:",omitempty"`
 }
 
 type nativeChange struct {
@@ -84,6 +88,8 @@ type NativeInstallPlan struct {
 	Harness string
 	Changes []nativeChange
 	MCP     []nativeMCPOp `json:",omitempty"`
+	// Warnings are shown to the user; they are not part of the journal.
+	Warnings []string `json:"-"`
 }
 
 func nativeStatePath(p Paths, harness string) string {
@@ -178,7 +184,7 @@ func loadNativeState(p Paths, harness string) (nativeState, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return s, fmt.Errorf("read %s ownership: %w", harness, err)
 	}
-	if s.Version != 1 && s.Version != nativeStateVersion {
+	if s.Version < 1 || s.Version > nativeStateVersion {
 		return s, fmt.Errorf("unsupported %s ownership version %d; upgrade ocp", harness, s.Version)
 	}
 	return s, nil
@@ -543,7 +549,7 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 		}
 	}
 	if harness == "claude" {
-		if plan.MCP, next.MCP, err = planClaudeMCP(p, old.MCP, rendered.MCP); err != nil {
+		if plan.MCP, next.MCP, plan.Warnings, err = planClaudeMCP(p, old.MCP, rendered.MCP); err != nil {
 			return plan, err
 		}
 	}

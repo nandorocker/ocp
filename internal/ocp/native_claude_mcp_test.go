@@ -104,7 +104,7 @@ func TestClaudeMCPConflictsAndExternalEdits(t *testing.T) {
 	p2 := nativeTestPaths(t)
 	applyNative(t, p2, "claude", NativeProfile{MCP: want})
 	nativeTestWrite(t, claudeJSONPath(p2), []byte(`{"mcpServers":{"x":{"type":"http","url":"https://edited.test"}}}`))
-	if _, err := PlanNativeInstall(p2, "claude", "default", NativeProfile{MCP: want}); err == nil || !strings.Contains(err.Error(), "edited outside OCP") {
+	if _, err := PlanNativeInstall(p2, "claude", "default", NativeProfile{MCP: want}); err == nil || !strings.Contains(err.Error(), "changed outside OCP") {
 		t.Fatalf("external edit = %v", err)
 	}
 }
@@ -180,3 +180,60 @@ func TestClaudeMCPServerTranslation(t *testing.T) {
 }
 
 func configProfile(cfg map[string]any) config.Profile { return config.Profile{Config: cfg} }
+
+func TestClaudeMCPMissingOrEditedOwnedServers(t *testing.T) {
+	withFakeClaude(t)
+	p := nativeTestPaths(t)
+	a := map[string]any{"type": "http", "url": "https://a.test"}
+	b := map[string]any{"type": "http", "url": "https://b.test"}
+	applyNative(t, p, "claude", NativeProfile{MCP: map[string]any{"a": a, "b": b}})
+	// The user removes a, and edits b.
+	nativeTestWrite(t, claudeJSONPath(p), []byte(`{"mcpServers":{"b":{"type":"http","url":"https://edited.test"}}}`))
+	// Still wanted: a is reinstalled, but the edited b blocks an update.
+	if _, err := PlanNativeInstall(p, "claude", "default", NativeProfile{MCP: map[string]any{"a": a, "b": b}}); err == nil || !strings.Contains(err.Error(), "changed outside OCP") {
+		t.Fatalf("edited wanted server = %v", err)
+	}
+	applyNative(t, p, "claude", NativeProfile{MCP: map[string]any{"a": a}})
+	if got := claudeServers(t, p); !nativeEqual(got, map[string]any{"a": a, "b": map[string]any{"type": "http", "url": "https://edited.test"}}) {
+		t.Fatalf("after apply = %v", got)
+	}
+	// Reset works even though b was edited: it is released, not removed.
+	plan, err := PlanNativeReset(p, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyNativePlan(p, plan); err != nil {
+		t.Fatal(err)
+	}
+	if got := claudeServers(t, p); !nativeEqual(got, map[string]any{"b": map[string]any{"type": "http", "url": "https://edited.test"}}) {
+		t.Fatalf("after reset = %v", got)
+	}
+}
+
+func TestClaudeMCPToleratesEmptyDefaultsAndRefusesChangedReplays(t *testing.T) {
+	if !claudeEquivalent(map[string]any{"type": "stdio", "command": "x", "args": []any{}}, map[string]any{"type": "stdio", "command": "x"}) {
+		t.Fatal("empty args added by Claude counted as an edit")
+	}
+	if claudeEquivalent(map[string]any{"type": "stdio", "command": "x", "env": map[string]any{"A": "1"}}, map[string]any{"type": "stdio", "command": "x"}) {
+		t.Fatal("a real added field was ignored")
+	}
+	withFakeClaude(t)
+	p := nativeTestPaths(t)
+	nativeTestWrite(t, claudeJSONPath(p), []byte(`{"mcpServers":{"x":{"type":"http","url":"https://user-changed.test"}}}`))
+	op := nativeMCPOp{Name: "x", Remove: true, Before: map[string]any{"type": "http", "url": "https://old.test"}, Add: map[string]any{"type": "http", "url": "https://new.test"}}
+	if err := applyClaudeMCP(p, op); err == nil || !strings.Contains(err.Error(), "changed during the update") {
+		t.Fatalf("replay over a user change = %v", err)
+	}
+}
+
+func TestClaudeMCPWrappedCommandKeepsEnvTranslation(t *testing.T) {
+	withHelper(t, "/bin/ocp", nil)
+	got, _, _ := claudeMCPServer(mcpServer{Name: "s", Local: true, Command: []string{"npx", "--token={env:T}"}, Env: map[string]string{"K": "{file:/k}"}}, "/src")
+	if !nativeEqual(got["args"], []any{"secret", "exec", "K={file:/k}", "--", "npx", "--token=${T}"}) {
+		t.Fatalf("args = %v", got["args"])
+	}
+	_, warning, _ := claudeMCPServer(mcpServer{Name: "-bad", URL: "https://x.test"}, "/src")
+	if !strings.Contains(warning, "skipped") {
+		t.Fatalf("bad name = %q", warning)
+	}
+}

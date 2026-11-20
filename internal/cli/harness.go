@@ -254,7 +254,7 @@ func (r *Runner) refreshHarnesses(p ocp.Paths, s *ocp.State, d *config.Document,
 			for _, op := range item.plan.MCPChanges() {
 				fmt.Fprintf(r.Out, "  mcp %s\n", op)
 			}
-			for _, warning := range item.rendered.Warnings {
+			for _, warning := range append(item.rendered.Warnings, item.plan.Warnings...) {
 				r.c.Warning(warning)
 			}
 			continue
@@ -268,7 +268,7 @@ func (r *Runner) refreshHarnesses(p ocp.Paths, s *ocp.State, d *config.Document,
 			return fmt.Errorf("%s update failed (earlier targets may already be updated): %w", item.harness, err)
 		}
 		fmt.Fprintf(r.Out, "%s: active profile %s\n", item.harness, item.profile.Name)
-		for _, warning := range item.rendered.Warnings {
+		for _, warning := range append(item.rendered.Warnings, item.plan.Warnings...) {
 			r.c.Warning(warning)
 		}
 	}
@@ -340,6 +340,9 @@ func (r *Runner) resetHarnesses(p ocp.Paths, targets []string, preview bool) err
 			return err
 		}
 		fmt.Fprintf(r.Out, "%s: detached\n", plan.Harness)
+		for _, warning := range plan.Warnings {
+			r.c.Warning(warning)
+		}
 	}
 	return nil
 }

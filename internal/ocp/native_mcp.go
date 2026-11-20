@@ -365,6 +365,9 @@ func claudeTemplate(v string) (string, bool) {
 // read from files go through `ocp secret exec` (environment) or a
 // headersHelper running `ocp secret headers` (headers). No secret is written.
 func claudeMCPServer(s mcpServer, source string) (map[string]any, string, error) {
+	if !claudeServerName.MatchString(s.Name) {
+		return nil, fmt.Sprintf("MCP server %q skipped: Claude Code server names use letters, digits, - and _ and must not start with -", s.Name), nil
+	}
 	if s.Local {
 		command := make([]any, 0, len(s.Command))
 		for _, word := range s.Command {
@@ -397,11 +400,8 @@ func claudeMCPServer(s mcpServer, source string) (map[string]any, string, error)
 			for _, pair := range secretArgs(secret) {
 				wrapped = append(wrapped, pair)
 			}
-			wrapped = append(wrapped, "--")
-			for _, word := range s.Command {
-				wrapped = append(wrapped, word)
-			}
-			command = wrapped
+			// Claude expands ${NAME} in these words before the helper runs.
+			command = append(append(wrapped, "--"), command...)
 		}
 		out := map[string]any{"type": "stdio", "command": command[0], "args": command[1:]}
 		if len(env) > 0 {
@@ -443,6 +443,8 @@ func claudeMCPServer(s mcpServer, source string) (map[string]any, string, error)
 	}
 	return out, "", nil
 }
+
+var claudeServerName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]*$`)
 
 // claudeCommand finds the claude CLI, which OCP uses to add and remove MCP
 // servers instead of writing ~/.claude.json while Claude may be using it.
