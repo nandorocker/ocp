@@ -155,6 +155,19 @@ skills:
 
 The subpath must stay inside the repository, must not pass through symlinks, and must contain `SKILL.md`. Each skill is locked separately in `ocp.lock`, and the skill is named after its last path segment. The `@ref` suffix works on `https://` and `github:` entries; use the expanded form for a ref on `ssh://` or `git@` URLs. Once `ocp.lock` contains a `path`, every machine syncing that source needs an `ocp` build that supports subpaths; older builds reject the lock. Cached checkouts that the lock no longer references are removed automatically.
 
+To switch a skill or plugin off without deleting it, name it in `disabled:`. It stays declared, validated and pinned in `ocp.lock`, but is not rendered:
+
+```yaml
+# profiles/lean/profile.yaml
+extends: default
+disabled: [karpathy-guidelines, opencode-model-router]
+```
+
+- Skills are named by their last path segment, as they render. Plugins are named by file name without extension, or by npm package name without a version.
+- `disabled:` works at the root, in a profile and in a `machines.<name>` overlay. Lists add up down the inheritance chain, so a profile can switch off what its parent or the root adds. To turn something back on, remove it from the list.
+- A name that matches nothing is a warning, not an error, so removing a skill upstream does not break the profile.
+- `ocp show` lists disabled entries.
+
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 
 Local plugin files live under `plugins/`. List `.ts`/`.js` filenames relative to that folder in `plugins` or `config.plugin`, for example `harness-bridge.ts`. Existing `./plugins/...` declarations remain supported. OCP validates local files and renders `file://` URLs using this machine's source path; npm package declarations pass through unchanged. Local skills and plugins outside their standard folders are rejected.

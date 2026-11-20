@@ -81,6 +81,8 @@ type showProfile struct {
 	Agents       []showEntry `json:"agents,omitempty"`
 	Instructions []showEntry `json:"instructions,omitempty"`
 	Files        []showEntry `json:"files,omitempty"`
+	// Disabled names skills and plugins switched off with `disabled:`.
+	Disabled []string `json:"disabled,omitempty"`
 	// Context is an estimate for this machine; host-limited profiles that
 	// do not render here have none.
 	Context *ocp.ContextEstimate `json:"context,omitempty"`
@@ -129,6 +131,7 @@ func (r *Runner) show(p ocp.Paths, args []string) error {
 	for _, v := range ex.Profiles {
 		if profile == "" || v.Profile.Name == profile {
 			sp := buildShowProfile(v, source, v.Profile.Name == active)
+			sp.Disabled = append([]string(nil), v.Profile.Disabled...)
 			if est, ok := estimates[v.Profile.Name]; ok {
 				sp.Context = &est
 			}
@@ -706,6 +709,9 @@ func (v *showView) node(all []showProfile, p showProfile, prefix string, last bo
 	list("skills", p.Skills)
 	list("plugins", p.Plugins)
 	list("files", p.Files)
+	if len(p.Disabled) > 0 {
+		row("disabled", v.dim(strings.Join(p.Disabled, "  ")))
+	}
 	for i, k := range kids {
 		if i == 0 {
 			v.line("%s%s", prefix+v.tree(cont), v.tree(bar))
@@ -826,6 +832,13 @@ func (v *showView) detail(p showProfile) {
 	v.table("agents", p.Agents, false)
 	v.table("instructions", p.Instructions, false)
 	v.table("files", p.Files, false)
+	if len(p.Disabled) > 0 {
+		v.gap()
+		v.line("%s", v.style(color.ANSIBoldDim, "disabled"))
+		for _, name := range p.Disabled {
+			v.line("  %s", v.dim(name))
+		}
+	}
 }
 
 // groupSkills groups skills by source, origin and machine, largest group first.

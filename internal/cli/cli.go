@@ -539,8 +539,14 @@ func (r *Runner) setupRun(p ocp.Paths, source string, sourceExplicit bool, repo 
 	if doc.Harnesses != nil {
 		wanted = activeProfile
 	}
-	if _, e := r.installSelected(p, source, autoCommit, true, force, true, machine, wanted); e != nil {
+	res, e := r.installSelected(p, source, autoCommit, true, force, true, machine, wanted)
+	if e != nil {
 		return e
+	}
+	if res != nil {
+		for _, w := range res.Warnings {
+			r.c.Warning(w)
+		}
 	}
 	if activeProfile != "" && doc.Harnesses == nil {
 		if e := ocp.Activate(p, activeProfile); e != nil {
