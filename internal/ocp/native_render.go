@@ -83,6 +83,7 @@ func PrepareNativeProfile(source string, p config.Profile, harness, machine stri
 	if len(p.Plugins) > 0 {
 		out.Warnings = append(out.Warnings, harness+": omitted OpenCode plugins")
 	}
+	out.Warnings = append(out.Warnings, disabledWarnings(p)...)
 	if len(p.FilesDirs) > 0 {
 		out.Warnings = append(out.Warnings, harness+": omitted the profile's files/ directory, which is rendered for OpenCode only")
 	}

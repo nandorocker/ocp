@@ -177,7 +177,7 @@ func (r *Runner) refreshHarnesses(p ocp.Paths, s *ocp.State, d *config.Document,
 	// preview mode. Git checkouts are populated only after compatibility preflight.
 	var gitSkills []config.Skill
 	for _, item := range selected {
-		gitSkills = append(gitSkills, item.profile.Skills...)
+		gitSkills = append(append(gitSkills, item.profile.Skills...), item.profile.DisabledSkills...)
 		if item.harness == "opencode" {
 			// Preserve the existing generated-profile/run surface, not just the
 			// selected profile, when explicitly updating OpenCode.

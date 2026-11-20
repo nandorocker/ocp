@@ -196,6 +196,7 @@ func Render(o RenderOptions) (RenderResult, error) {
 			return RenderResult{}, err
 		}
 		result.Profiles, result.Warnings = append(result.Profiles, profile.Name), append(result.Warnings, warnings...)
+		result.Warnings = append(result.Warnings, disabledWarnings(profile)...)
 	}
 	if !o.Force {
 		if paths, err := drift(o.Paths); err != nil {
@@ -911,4 +912,15 @@ func replaceSymlink(link, target string) error {
 	}
 	defer os.Remove(tmp)
 	return os.Rename(tmp, link)
+}
+
+// disabledWarnings reports `disabled:` names that matched no skill or plugin.
+// A warning, not an error: the entry may have been removed upstream on
+// purpose, and the profile still renders correctly.
+func disabledWarnings(p config.Profile) []string {
+	var out []string
+	for _, name := range p.UnmatchedDisabled {
+		out = append(out, fmt.Sprintf("profile %s: disabled %q matches no skill or plugin", p.Name, name))
+	}
+	return out
 }
