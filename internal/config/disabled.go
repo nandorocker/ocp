@@ -10,7 +10,7 @@ import (
 // version for npm packages.
 func pluginName(entry string) string {
 	local := strings.Contains(entry, "/") && !strings.HasPrefix(entry, "@")
-	for _, ext := range []string{".ts", ".js", ".mjs"} {
+	for _, ext := range pluginExtensions {
 		local = local || strings.HasSuffix(entry, ext)
 	}
 	if !local {
@@ -21,10 +21,29 @@ func pluginName(entry string) string {
 		return entry
 	}
 	name := path.Base(strings.TrimRight(entry, "/"))
-	for _, ext := range []string{".ts", ".js", ".mjs"} {
+	for _, ext := range pluginExtensions {
 		name = strings.TrimSuffix(name, ext)
 	}
 	return name
+}
+
+// pluginExtensions are the local plugin file types OCP accepts.
+var pluginExtensions = []string{".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"}
+
+// configPluginName names an item of config.plugin(s): a string, or the first
+// element of a [name, options] pair.
+func configPluginName(item any) (string, bool) {
+	switch v := item.(type) {
+	case string:
+		return pluginName(v), true
+	case []any:
+		if len(v) > 0 {
+			if name, ok := v[0].(string); ok {
+				return pluginName(name), true
+			}
+		}
+	}
+	return "", false
 }
 
 // applyDisabled removes skills and plugins named in p.Disabled, from the
@@ -40,9 +59,11 @@ func applyDisabled(p *Profile) {
 	}
 	matched := map[string]bool{}
 	skills := p.Skills[:0:0]
+	p.DisabledSkills = nil
 	for _, s := range p.Skills {
 		if name := s.Name(); off[name] {
 			matched[name] = true
+			p.DisabledSkills = append(p.DisabledSkills, s)
 			continue
 		}
 		skills = append(skills, s)
@@ -64,8 +85,8 @@ func applyDisabled(p *Profile) {
 		}
 		kept := make([]any, 0, len(list))
 		for _, item := range list {
-			if entry, ok := item.(string); ok && off[pluginName(entry)] {
-				matched[pluginName(entry)] = true
+			if name, ok := configPluginName(item); ok && off[name] {
+				matched[name] = true
 				continue
 			}
 			kept = append(kept, item)

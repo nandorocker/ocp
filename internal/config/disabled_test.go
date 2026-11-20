@@ -85,6 +85,8 @@ func TestPluginName(t *testing.T) {
 		"@scope/pkg@2":                        "@scope/pkg",
 		"@scope/pkg":                          "@scope/pkg",
 		"file:///abs/plugins/decision":        "decision",
+		"x.cjs":                               "x",
+		"{env:HOME}/a@b/plugins/x.ts":         "x",
 	} {
 		if got := pluginName(in); got != want {
 			t.Errorf("pluginName(%q) = %q, want %q", in, got, want)
@@ -116,5 +118,28 @@ func TestDisabledByAncestorStillMatchesInDescendants(t *testing.T) {
 		if p.Name == "default" && (len(p.Skills) != 1 || p.Skills[0].Source != "b") {
 			t.Errorf("default skills = %v", p.Skills)
 		}
+	}
+}
+
+func TestDisabledPairPluginsAndKeepsDisabledSkills(t *testing.T) {
+	dir := t.TempDir()
+	doc := "version: 1\nskills: [github:org/repo//skills/heavy]\nconfig:\n  plugin: [[opencode-foo, {x: 1}], keep]\nplugins: [tool.cjs]\ndisabled: [heavy, opencode-foo, tool]\n"
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := d.ResolveFromDirForMachine(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := profiles[0]
+	if len(p.Skills) != 0 || len(p.DisabledSkills) != 1 || p.DisabledSkills[0].Path != "skills/heavy" {
+		t.Fatalf("skills %v, disabled skills %v", p.Skills, p.DisabledSkills)
+	}
+	if !reflect.DeepEqual(p.Config["plugin"], []any{"keep"}) || len(p.Plugins) != 0 || len(p.UnmatchedDisabled) != 0 {
+		t.Fatalf("config.plugin %v, plugins %v, unmatched %v", p.Config["plugin"], p.Plugins, p.UnmatchedDisabled)
 	}
 }

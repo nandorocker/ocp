@@ -581,7 +581,8 @@ func gitSkills(source string) ([]config.Skill, error) {
 	seen := map[string]bool{}
 	var out []config.Skill
 	for _, p := range ps {
-		for _, s := range p.Skills {
+		// Disabled skills are not rendered but stay locked and upgradeable.
+		for _, s := range append(append([]config.Skill(nil), p.Skills...), p.DisabledSkills...) {
 			if s.IsGit() {
 				k := s.Source + "\x00" + s.Path + "\x00" + s.Ref
 				if !seen[k] {

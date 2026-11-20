@@ -124,6 +124,9 @@ type Profile struct {
 	// UnmatchedDisabled lists Disabled names that matched nothing, which
 	// renders as a warning rather than an error.
 	UnmatchedDisabled []string
+	// DisabledSkills are the skills Disabled removed. They are not rendered
+	// but stay locked, validated and upgradeable.
+	DisabledSkills []Skill
 }
 
 // Load parses and validates an OCP document from path.
@@ -197,7 +200,7 @@ func compositionFromOverlay(o MachineOverlay) composition {
 	return composition{o.Config, o.Instructions, o.Skills, o.Plugins, o.Agents, nil, nil, nil, o.Claude, o.Codex, o.Disabled}
 }
 func resolved(name string, c composition) Profile {
-	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...), cloneMap(c.claude), cloneMap(c.codex), append([]string(nil), c.disabled...), nil}
+	return Profile{name, cloneMap(c.config), append([]string(nil), c.instructions...), append([]Skill(nil), c.skills...), append([]string(nil), c.plugins...), cloneAgents(c.agents), append([]string(nil), c.hosts...), cloneMachines(c.machines), append([]string(nil), c.filesDirs...), cloneMap(c.claude), cloneMap(c.codex), append([]string(nil), c.disabled...), nil, nil}
 }
 
 func mergeComposition(base, child composition) composition {

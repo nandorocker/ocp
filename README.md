@@ -166,7 +166,7 @@ disabled: [karpathy-guidelines, opencode-model-router]
 - Skills are named by their last path segment, as they render. Plugins are named by file name without extension, or by npm package name without a version.
 - `disabled:` works at the root, in a profile and in a `machines.<name>` overlay. Lists add up down the inheritance chain, so a profile can switch off what its parent or the root adds. To turn something back on, remove it from the list.
 - A name that matches nothing is a warning, not an error, so removing a skill upstream does not break the profile.
-- `ocp show` lists disabled entries.
+- `ocp show` lists disabled entries from the root and profiles. A `disabled:` list inside a machine overlay is applied on that machine but not shown yet.
 
 `agents.<name>.model` is shorthand for `agents.<name>.config.model`. A native `model` in referenced agent Markdown frontmatter is the default, but a profile agent assignment model overrides it.
 
