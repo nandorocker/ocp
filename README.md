@@ -200,6 +200,23 @@ opencode
 
 `ocp sync` uses the current branch's configured upstream, safely merges non-conflicting divergence, pushes local canonical changes when automatic commits are enabled, resolves locked Git skills, renders profiles and preserves the active profile.
 
+## Bring an existing setup
+
+Most people already have instructions, skills and MCP servers spread across Claude Code, Codex and OpenCode. `ocp adopt` lists them, marking each one as already in the source, new, or different between harnesses. It also flags an instruction file that is an older copy of one in your source. It only reads.
+
+```bash
+ocp adopt                         # what each harness holds outside OCP
+ocp adopt --json                  # the same, for an agent with the OCP skill
+ocp adopt --write ~/.config/ocp   # no source yet: create one from it
+```
+
+`--write` copies skills, uses the first instruction file as `AGENTS.md`, and converts MCP servers to OpenCode's format.
+
+- **Secrets:** values that look like secrets become `{env:NAME}` references, and the command lists each variable to set. This covers environment values, headers, URL credentials and query parameters, and command flags such as `--token`. Files such as `.env`, `*.pem` and `*.key` are left out of copied skills.
+- **Check before committing:** review the copied skills and `AGENTS.md`, which are copied as they are, before you commit the source.
+- **Conflicts:** `--write` dry-runs the install and lists hand-made entries that would conflict with `ocp setup`, such as an MCP server whose secret is now read from the environment. Remove those first.
+- **Hand-copied files:** when OCP installs into a harness, a hand-copied file identical to the source's is adopted rather than refused. If OCP later changes or drops it, the original file and its permissions are put back.
+
 ## Let your agent manage OCP
 
 Agents edit configuration now more often than people do. OCP ships a skill that teaches Claude Code, Codex and OpenCode to make changes in the OCP source rather than in one harness's files. With it, "add the Playwright MCP, Mac only" lands in the right overlay and reaches every harness. Add it like any Git skill:
@@ -252,6 +269,7 @@ ocp status [--json]
 ocp show [profile] [--json] [--all]
 ocp version
 ocp import [path]
+ocp adopt [--json] [--write <dir>]
 ocp upgrade [--preview] [--force] [skill <name>]
 ocp reset
 ```

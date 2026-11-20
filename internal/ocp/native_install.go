@@ -28,14 +28,20 @@ type nativeKey struct {
 }
 
 // nativeStateVersion 2 added collection entries (MCP servers, providers, env
-// variables) to owned keys; 3 adds Claude Code MCP servers. Older versions
-// are subsets and still load; an older OCP refuses a newer version rather
-// than forgetting what it owns.
-const nativeStateVersion = 3
+// variables) to owned keys; 3 added Claude Code MCP servers; 4 adds adopted
+// files. Older versions are subsets and still load; an older OCP refuses a
+// newer version rather than forgetting what it owns.
+const nativeStateVersion = 4
 
 type nativeFile struct {
 	Data []byte
 	Mode uint32
+	// Adopted marks a file that already existed with exactly this content
+	// (a hand-copied skill, say). OCP owns it while installed; when it stops
+	// wanting it, the original content and mode are put back.
+	Adopted      bool   `json:",omitempty"`
+	Original     []byte `json:",omitempty"`
+	OriginalMode uint32 `json:",omitempty"`
 }
 
 type nativeState struct {
@@ -514,7 +520,35 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 			}
 		}
 		if !wasOwned && exists {
-			return plan, fmt.Errorf("refusing unmanaged file collision: %s", path)
+			if !want || !bytes.Equal(b, desired.Data) {
+				return plan, fmt.Errorf("refusing unmanaged file collision: %s", path)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return plan, err
+			}
+			mode := uint32(info.Mode().Perm())
+			next.Files[rel] = nativeFile{Data: desired.Data, Mode: mode, Adopted: true, Original: b, OriginalMode: mode}
+			continue
+		}
+		if wasOwned && owned.Adopted {
+			if want {
+				// Keep what the user had, to put back later.
+				desired.Adopted, desired.Original, desired.OriginalMode = true, owned.Original, owned.OriginalMode
+				if bytes.Equal(b, desired.Data) {
+					desired.Mode = owned.Mode
+				}
+				next.Files[rel] = desired
+				if err = add("files/"+rel, desired.Data, true, desired.Mode); err != nil {
+					return plan, err
+				}
+				continue
+			}
+			// No longer wanted: put the user's own file back as it was.
+			if err = add("files/"+rel, owned.Original, true, owned.OriginalMode); err != nil {
+				return plan, err
+			}
+			continue
 		}
 		if err = add("files/"+rel, desired.Data, want, desired.Mode); err != nil {
 			return plan, err

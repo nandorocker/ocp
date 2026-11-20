@@ -237,3 +237,19 @@ func TestClaudeMCPWrappedCommandKeepsEnvTranslation(t *testing.T) {
 		t.Fatalf("bad name = %q", warning)
 	}
 }
+
+func TestNativeAdoptsIdenticalHandCopiedSkillFiles(t *testing.T) {
+	p := nativeTestPaths(t)
+	skill := nativeTestPath(t, p, "claude", "files/skills/hand/SKILL.md")
+	nativeTestWrite(t, skill, []byte("same"))
+	applyNative(t, p, "claude", NativeProfile{Files: map[string][]byte{"skills/hand/SKILL.md": []byte("same")}})
+	applyNative(t, p, "claude", NativeProfile{Files: map[string][]byte{"skills/hand/SKILL.md": []byte("same")}})
+	nativeTestReset(t, p, "claude")
+	if got := string(nativeTestRead(t, skill)); got != "same" {
+		t.Fatalf("adopted file = %q after reset", got)
+	}
+	nativeTestWrite(t, skill, []byte("different"))
+	if _, err := PlanNativeInstall(p, "claude", "default", NativeProfile{Files: map[string][]byte{"skills/hand/SKILL.md": []byte("same")}}); err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("different file = %v", err)
+	}
+}

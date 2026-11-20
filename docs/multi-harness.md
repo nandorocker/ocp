@@ -150,7 +150,7 @@ Codex output uses `~/.codex/config.toml`, a bounded block in `~/.codex/AGENTS.md
 
 OCP preserves unrelated settings and guide text. Codex TOML edits preserve unrelated comments and formatting; Claude JSON may be reformatted. Existing values of owned settings are recorded for reset. Unmanaged generated-file collisions, edited owned content, and destination symlinks are refused. Credentials, runtime state, history, and entire native home directories are not taken over. Custom `CLAUDE_CONFIG_DIR`/`CODEX_HOME` environments are currently refused rather than installing into the wrong location.
 
-Each native target has separate ownership records, stored as version 3. An older OCP refuses them rather than forgetting what it owns. OpenCode activation in multi-harness mode is pinned to an immutable release, so updates of another target cannot change a skipped OpenCode setup.
+Each native target has separate ownership records, stored as version 4. An older OCP refuses them rather than forgetting what it owns. OpenCode activation in multi-harness mode is pinned to an immutable release, so updates of another target cannot change a skipped OpenCode setup.
 
 ```sh
 ocp apply --preview
