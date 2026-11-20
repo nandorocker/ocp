@@ -93,7 +93,7 @@ func TestShowOverviewPlainListsOnlyWhatEachProfileAdds(t *testing.T) {
 		"machines   cosmonaut, windy\n",
 		"-- default\n",
 		"-- lab (cosmonaut only)\n",
-		"-- router\n",
+		"-- router  ~4 tokens\n",
 		"model     vendor/router *\n",
 		"skills    shared*  own-skill\n",
 		"plugins   npm-plugin\n",
@@ -627,4 +627,66 @@ func TestShowReportsMachinesThatDoNotResolveAsWarnings(t *testing.T) {
 	if !strings.Contains(out.String(), "! machine cosmonaut does not resolve") {
 		t.Errorf("expected a warning:\n%s", out.String())
 	}
+}
+
+func TestShowContextEstimate(t *testing.T) {
+	files := map[string]string{
+		"ocp.yaml":            "version: 1\ninstructions: [AGENTS.md]\nskills: [big]\nconfig:\n  mcp:\n    servers:\n      pw: {type: local, command: [npx, pw]}\n",
+		"AGENTS.md":           strings.Repeat("a", 4000),
+		"skills/big/SKILL.md": "---\nname: big\ndescription: " + strings.Repeat("d", 400) + "\n---\n" + strings.Repeat("b", 8000),
+	}
+	_, r, out := showSetup(t, "windy", files)
+	if err := r.Run([]string{"show", "default"}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"context  ~1.1k tokens before the first prompt (estimate)\n",
+		"  instructions   1  1k\n",
+		"  skills         1  102\n",
+		"  skill bodies ~2k load when used, 1 MCP server not measured\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	out.Reset()
+	if err := r.Run([]string{"show", "--json", "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"tokens": 1102`) || !strings.Contains(out.String(), `"mcp_servers": 1`) {
+		t.Errorf("json missing context:\n%s", out.String())
+	}
+}
+
+func TestShowAndListAreReadOnlyForUnlockedGitSkills(t *testing.T) {
+	files := map[string]string{"ocp.yaml": "version: 1\nskills: [github:owner/repo//skills/x]\n"}
+	p, r, out := showSetup(t, "windy", files)
+	var state struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, p.StateFile)), &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"show"}, {"show", "default"}, {"list"}} {
+		out.Reset()
+		if err := r.Run(args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(state.Source, "ocp.lock")); !os.IsNotExist(err) {
+		t.Fatalf("show/list wrote ocp.lock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.Data, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("show/list touched the skill cache: %v", err)
+	}
+}
+
+func readFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

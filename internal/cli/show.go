@@ -18,6 +18,7 @@ import (
 	"github.com/nando/ocp/internal/color"
 	"github.com/nando/ocp/internal/config"
 	"github.com/nando/ocp/internal/ocp"
+	"github.com/nando/ocp/internal/skills"
 )
 
 const (
@@ -80,6 +81,9 @@ type showProfile struct {
 	Agents       []showEntry `json:"agents,omitempty"`
 	Instructions []showEntry `json:"instructions,omitempty"`
 	Files        []showEntry `json:"files,omitempty"`
+	// Context is an estimate for this machine; host-limited profiles that
+	// do not render here have none.
+	Context *ocp.ContextEstimate `json:"context,omitempty"`
 }
 
 type showGlobal struct {
@@ -121,9 +125,14 @@ func (r *Runner) show(p ocp.Paths, args []string) error {
 	active, _ := ocp.ActiveProfile(p)
 
 	out := showDoc{Current: state.Machine, Active: active, Machines: ex.Machines, Profiles: []showProfile{}}
+	estimates := contextEstimates(p, source, doc, state.Machine)
 	for _, v := range ex.Profiles {
 		if profile == "" || v.Profile.Name == profile {
-			out.Profiles = append(out.Profiles, buildShowProfile(v, source, v.Profile.Name == active))
+			sp := buildShowProfile(v, source, v.Profile.Name == active)
+			if est, ok := estimates[v.Profile.Name]; ok {
+				sp.Context = &est
+			}
+			out.Profiles = append(out.Profiles, sp)
 		}
 	}
 	if profile != "" && len(out.Profiles) == 0 {
@@ -663,6 +672,9 @@ func (v *showView) node(all []showProfile, p showProfile, prefix string, last bo
 	if len(p.Hosts) > 0 {
 		head += " " + v.dim("(") + v.hosts(p.Hosts) + v.dim(" only)")
 	}
+	if p.Context != nil && p.Context.Tokens > 0 {
+		head += "  " + v.dim("~"+ocp.FormatTokens(p.Context.Tokens)+" tokens")
+	}
 	v.line("%s%s%s", prefix, v.tree(branch), head)
 
 	var kids []showProfile
@@ -806,6 +818,7 @@ func (v *showView) detail(p showProfile) {
 		}
 		v.line("%s", line)
 	}
+	v.context(p.Context)
 	v.table("skills", p.Skills, true)
 	v.table("plugins", p.Plugins, false)
 	v.table("mcp", p.MCP, false)
@@ -910,4 +923,87 @@ func (v *showView) footnote() {
 		v.gap()
 		v.line("%s", v.dim(strings.Join(notes, v.glyph(" · ", ", "))))
 	}
+}
+
+// contextEstimates measures every profile that renders on this machine. It is
+// best effort: a configuration that does not resolve here shows no estimate.
+func contextEstimates(p ocp.Paths, source string, doc *config.Document, machine string) map[string]ocp.ContextEstimate {
+	out := map[string]ocp.ContextEstimate{}
+	profiles, err := doc.ResolveFromDirForMachine(source, machine)
+	if err != nil {
+		return out
+	}
+	var provider ocp.SkillProvider
+	if gs, err := gitSkills(source); err == nil {
+		if cached, err := skills.Cached(source, p.Data, gs); err == nil {
+			provider = &memoProvider{inner: cached, dirs: map[string]memoDir{}}
+		}
+	}
+	for _, profile := range profiles {
+		if est, err := ocp.EstimateContext(source, profile, machine, provider); err == nil {
+			out[profile.Name] = est
+		}
+	}
+	return out
+}
+
+// context prints what the profile loads before the first prompt.
+func (v *showView) context(est *ocp.ContextEstimate) {
+	if est == nil || est.Tokens == 0 && est.OnDemand == 0 && est.MCPServers == 0 && len(est.Unmeasured) == 0 {
+		return
+	}
+	v.gap()
+	v.line("%s  %s", v.style(color.ANSIBoldDim, "context"), v.dim("~"+ocp.FormatTokens(est.Tokens)+" tokens before the first prompt (estimate)"))
+	w := 0
+	for _, part := range est.Parts {
+		w = max(w, len(part.Kind))
+	}
+	for _, part := range est.Parts {
+		count := ""
+		if part.Count > 0 {
+			count = fmt.Sprintf("%3d", part.Count)
+		}
+		v.line("%s", strings.TrimRight(fmt.Sprintf("  %s %s  %s", pad(part.Kind, w), count, ocp.FormatTokens(part.Tokens)), " "))
+	}
+	var notes []string
+	if est.OnDemand > 0 {
+		notes = append(notes, "skill bodies ~"+ocp.FormatTokens(est.OnDemand)+" load when used")
+	}
+	if est.MCPServers > 0 {
+		noun := "servers"
+		if est.MCPServers == 1 {
+			noun = "server"
+		}
+		notes = append(notes, fmt.Sprintf("%d MCP %s not measured", est.MCPServers, noun))
+	}
+	if n := len(est.Unmeasured); n == 1 {
+		notes = append(notes, "1 skill not measured (not cached yet, or unreadable)")
+	} else if n > 1 {
+		notes = append(notes, fmt.Sprintf("%d skills not measured (not cached yet, or unreadable)", n))
+	}
+	if len(notes) > 0 {
+		v.line("  %s", v.dim(strings.Join(notes, v.glyph(" · ", ", "))))
+	}
+}
+
+type memoDir struct {
+	dir string
+	err error
+}
+
+// memoProvider resolves each Git skill once per command, since profiles
+// share skills and each lookup runs git.
+type memoProvider struct {
+	inner ocp.SkillProvider
+	dirs  map[string]memoDir
+}
+
+func (m *memoProvider) SkillDir(s config.Skill) (string, error) {
+	key := s.Source + "\x00" + s.Path + "\x00" + s.Ref
+	if d, ok := m.dirs[key]; ok {
+		return d.dir, d.err
+	}
+	dir, err := m.inner.SkillDir(s)
+	m.dirs[key] = memoDir{dir, err}
+	return dir, err
 }
