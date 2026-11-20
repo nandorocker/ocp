@@ -59,7 +59,10 @@ func commands() []command {
 		}},
 		{"run", "run <profile> [opencode arguments...]", "Run OpenCode with a profile.", "Run OpenCode with the selected profile without changing the active profile.", []string{"ocp run default --prompt hello"}, nil},
 		{"list", "list", "List rendered profiles.", "List rendered profiles and mark the active profile.", []string{"ocp list"}, nil},
-		{"status", "status", "Show OCP status.", "Show the configured source and active profile.", []string{"ocp status"}, nil},
+		{"status", "status [--json]", "Show OCP status.", "Show the configured source, this machine, and the active profile of each harness.", []string{"ocp status", "ocp status --json"}, func(f *flag.FlagSet) {
+			var asJSON bool
+			configureStatus(f, &asJSON)
+		}},
 		{"show", "show [options] [profile]", "Show what profiles carry.", "Show the whole configuration: what applies to every profile and what each profile adds, with where each entry comes from, including every machine.", []string{"ocp show", "ocp show router", "ocp show apple --all", "ocp show --json"}, func(f *flag.FlagSet) { configureShow(f, &showOptions{}) }},
 		{"version", "version", "Show the OCP version.", "Print the version embedded when OCP was built.", []string{"ocp version", "ocp --version"}, nil},
 		{"import", "import [options] [path]", "Import an OpenCode configuration.", "Import an OpenCode configuration into an OCP source.", []string{"ocp import ~/.config/opencode", "ocp import --source ./ocp-config"}, func(f *flag.FlagSet) { configureImport(f, &importOptions{}, "") }},

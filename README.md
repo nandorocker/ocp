@@ -187,6 +187,17 @@ opencode
 
 `ocp sync` uses the current branch's configured upstream, safely merges non-conflicting divergence, pushes local canonical changes when automatic commits are enabled, resolves locked Git skills, renders profiles and preserves the active profile.
 
+## Let your agent manage OCP
+
+Agents edit configuration now more often than people do. OCP ships a skill that teaches Claude Code, Codex and OpenCode to make changes in the OCP source rather than in one harness's files. With it, "add the Playwright MCP, Mac only" lands in the right overlay and reaches every harness. Add it like any Git skill:
+
+```yaml
+skills:
+  - github:nandorocker/ocp//skills/ocp
+```
+
+The skill relies on `ocp status --json` to find the source and `ocp show --json` to read the effective configuration.
+
 ## Commands
 
 ### Multiple harnesses
@@ -224,7 +235,7 @@ ocp apply
 ocp use <profile>
 ocp run <profile> [args...]
 ocp list
-ocp status
+ocp status [--json]
 ocp show [profile] [--json] [--all]
 ocp version
 ocp import [path]
