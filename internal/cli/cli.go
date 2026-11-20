@@ -192,6 +192,8 @@ func (r *Runner) Run(args []string) error {
 		return r.reset(p, args[1:])
 	case "import":
 		return r.importConfig(p, args[1:])
+	case "adopt":
+		return r.adopt(p, args[1:])
 	case "upgrade":
 		return r.upgrade(p, args[1:])
 	}

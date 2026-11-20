@@ -36,6 +36,10 @@ const nativeStateVersion = 3
 type nativeFile struct {
 	Data []byte
 	Mode uint32
+	// Adopted marks a file that already existed with exactly this content
+	// (a hand-copied skill, say). OCP owns it while installed but leaves it
+	// in place when it stops wanting it.
+	Adopted bool `json:",omitempty"`
 }
 
 type nativeState struct {
@@ -514,7 +518,24 @@ func planNative(p Paths, harness, profile string, rendered NativeProfile, reset 
 			}
 		}
 		if !wasOwned && exists {
-			return plan, fmt.Errorf("refusing unmanaged file collision: %s", path)
+			if !want || !bytes.Equal(b, desired.Data) {
+				return plan, fmt.Errorf("refusing unmanaged file collision: %s", path)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return plan, err
+			}
+			desired.Mode, desired.Adopted = uint32(info.Mode().Perm()), true
+			next.Files[rel] = desired
+			continue
+		}
+		if wasOwned && want && owned.Adopted && bytes.Equal(b, desired.Data) {
+			desired.Mode, desired.Adopted = owned.Mode, true
+			next.Files[rel] = desired
+			continue
+		}
+		if wasOwned && !want && owned.Adopted {
+			continue // It was there before OCP; leave it.
 		}
 		if err = add("files/"+rel, desired.Data, want, desired.Mode); err != nil {
 			return plan, err
