@@ -2,6 +2,7 @@ package ocp
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,10 +38,32 @@ type ContextEstimate struct {
 
 func estimateTokens(chars int) int { return (chars + 3) / 4 }
 
+// maxSkillFile bounds what the estimate reads from one SKILL.md.
+const maxSkillFile = 1 << 20
+
+// readSkillFile reads a SKILL.md only if it is a regular file, as the
+// renderer requires, so a symlink or device in a skill repository cannot
+// make an estimate read something else or hang.
+func readSkillFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("SKILL.md is not a regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxSkillFile))
+}
+
 // EstimateContext measures a resolved profile from its source files. It
 // reads only; a Git skill without a cached checkout is listed as unmeasured.
 func EstimateContext(source string, p config.Profile, machine string, provider SkillProvider) (ContextEstimate, error) {
-	var est ContextEstimate
+	est := ContextEstimate{Parts: []ContextPart{}}
 	chars := 0
 	names := append([]string(nil), p.Instructions...)
 	if machine != "" {
@@ -77,7 +100,7 @@ func EstimateContext(source string, p config.Profile, machine string, provider S
 		}
 		var b []byte
 		if err == nil {
-			b, err = os.ReadFile(filepath.Join(dir, "SKILL.md"))
+			b, err = readSkillFile(filepath.Join(dir, "SKILL.md"))
 		}
 		if err != nil {
 			est.Unmeasured = append(est.Unmeasured, skill.Name())
@@ -102,15 +125,31 @@ func EstimateContext(source string, p config.Profile, machine string, provider S
 	}
 	est.OnDemand = estimateTokens(bodyChars)
 
+	// Agents come from agents: and from native config.agent; one that is
+	// disabled is never offered, so it costs nothing.
+	native, _ := p.Config["agent"].(map[string]any)
 	agentChars := 0
-	agentNames := make([]string, 0, len(p.Agents))
+	agentNames := make([]string, 0, len(p.Agents)+len(native))
 	for name := range p.Agents {
 		agentNames = append(agentNames, name)
 	}
+	for name := range native {
+		if _, dup := p.Agents[name]; !dup {
+			agentNames = append(agentNames, name)
+		}
+	}
 	sort.Strings(agentNames)
+	counted := 0
 	for _, name := range agentNames {
 		a := p.Agents[name]
+		base, _ := native[name].(map[string]any)
+		if disabled, _ := base["disable"].(bool); disabled {
+			continue
+		}
 		description, _ := a.Config["description"].(string)
+		if description == "" {
+			description, _ = base["description"].(string)
+		}
 		if description == "" && a.File != "" {
 			if b, err := readSource(source, a.File, false); err == nil {
 				if front, _, err := nativeFrontmatter(b); err == nil {
@@ -119,9 +158,10 @@ func EstimateContext(source string, p config.Profile, machine string, provider S
 			}
 		}
 		agentChars += len(name) + len(description) + 4
+		counted++
 	}
-	if len(agentNames) > 0 {
-		est.Parts = append(est.Parts, ContextPart{Kind: "agents", Count: len(agentNames), Tokens: estimateTokens(agentChars)})
+	if counted > 0 {
+		est.Parts = append(est.Parts, ContextPart{Kind: "agents", Count: counted, Tokens: estimateTokens(agentChars)})
 	}
 	if servers, err := openCodeMCPServers(p.Config); err == nil {
 		est.MCPServers = len(servers)

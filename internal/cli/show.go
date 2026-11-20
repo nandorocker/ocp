@@ -935,7 +935,9 @@ func contextEstimates(p ocp.Paths, source string, doc *config.Document, machine 
 	}
 	var provider ocp.SkillProvider
 	if gs, err := gitSkills(source); err == nil {
-		provider, _ = skills.Cached(source, p.Data, gs)
+		if cached, err := skills.Cached(source, p.Data, gs); err == nil {
+			provider = &memoProvider{inner: cached, dirs: map[string]memoDir{}}
+		}
 	}
 	for _, profile := range profiles {
 		if est, err := ocp.EstimateContext(source, profile, machine, provider); err == nil {
@@ -974,10 +976,34 @@ func (v *showView) context(est *ocp.ContextEstimate) {
 		}
 		notes = append(notes, fmt.Sprintf("%d MCP %s not measured", est.MCPServers, noun))
 	}
-	if n := len(est.Unmeasured); n > 0 {
-		notes = append(notes, fmt.Sprintf("%d skills not cached yet; run ocp sync", n))
+	if n := len(est.Unmeasured); n == 1 {
+		notes = append(notes, "1 skill not measured (not cached yet, or unreadable)")
+	} else if n > 1 {
+		notes = append(notes, fmt.Sprintf("%d skills not measured (not cached yet, or unreadable)", n))
 	}
 	if len(notes) > 0 {
 		v.line("  %s", v.dim(strings.Join(notes, v.glyph(" · ", ", "))))
 	}
+}
+
+type memoDir struct {
+	dir string
+	err error
+}
+
+// memoProvider resolves each Git skill once per command, since profiles
+// share skills and each lookup runs git.
+type memoProvider struct {
+	inner ocp.SkillProvider
+	dirs  map[string]memoDir
+}
+
+func (m *memoProvider) SkillDir(s config.Skill) (string, error) {
+	key := s.Source + "\x00" + s.Path + "\x00" + s.Ref
+	if d, ok := m.dirs[key]; ok {
+		return d.dir, d.err
+	}
+	dir, err := m.inner.SkillDir(s)
+	m.dirs[key] = memoDir{dir, err}
+	return dir, err
 }

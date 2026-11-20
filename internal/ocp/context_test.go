@@ -1,6 +1,8 @@
 package ocp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,5 +57,37 @@ func TestFormatTokens(t *testing.T) {
 		if got := FormatTokens(n); got != want {
 			t.Errorf("FormatTokens(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+func TestEstimateContextRefusesSymlinkedSkillFileAndCountsNativeAgents(t *testing.T) {
+	source := t.TempDir()
+	nativeFixture(t, source, "secret.txt", strings.Repeat("s", 4000))
+	if err := os.MkdirAll(filepath.Join(source, "skills", "evil"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(source, "secret.txt"), filepath.Join(source, "skills", "evil", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	p := config.Profile{
+		Skills: []config.Skill{{Source: "evil"}},
+		Config: map[string]any{"agent": map[string]any{
+			"helper": map[string]any{"description": "helps"},
+			"off":    map[string]any{"description": "never offered", "disable": true},
+		}},
+	}
+	est, err := EstimateContext(source, p, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(est.Unmeasured) != 1 || est.Unmeasured[0] != "evil" {
+		t.Fatalf("symlinked SKILL.md was read: %#v", est)
+	}
+	if len(est.Parts) != 1 || est.Parts[0] != (ContextPart{Kind: "agents", Count: 1, Tokens: 4}) {
+		t.Fatalf("native agents = %#v", est.Parts)
+	}
+	empty, _ := EstimateContext(source, config.Profile{}, "", nil)
+	if empty.Parts == nil {
+		t.Fatal("parts must be an empty list, not null, in JSON")
 	}
 }

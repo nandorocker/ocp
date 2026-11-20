@@ -658,3 +658,35 @@ func TestShowContextEstimate(t *testing.T) {
 		t.Errorf("json missing context:\n%s", out.String())
 	}
 }
+
+func TestShowAndListAreReadOnlyForUnlockedGitSkills(t *testing.T) {
+	files := map[string]string{"ocp.yaml": "version: 1\nskills: [github:owner/repo//skills/x]\n"}
+	p, r, out := showSetup(t, "windy", files)
+	var state struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, p.StateFile)), &state); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"show"}, {"show", "default"}, {"list"}} {
+		out.Reset()
+		if err := r.Run(args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(state.Source, "ocp.lock")); !os.IsNotExist(err) {
+		t.Fatalf("show/list wrote ocp.lock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.Data, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("show/list touched the skill cache: %v", err)
+	}
+}
+
+func readFile(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
