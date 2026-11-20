@@ -701,9 +701,9 @@ func (r *Runner) apply(p ocp.Paths, args []string) error {
 		return e
 	}
 	if multiHarness(doc, options) {
-		return r.refreshHarnesses(p, s, doc, options, "", false)
+		return r.refreshHarnesses(p, s, doc, options, "", true)
 	}
-	res, e := r.install(p, s.Source, s.AutoCommit, false, options.force, false, s.Machine)
+	res, e := r.install(p, s.Source, s.AutoCommit, true, options.force, false, s.Machine)
 	if d := new(ocp.DriftError); errors.As(e, &d) && !options.force {
 		return r.confirmDrift(p, s, d, "apply")
 	}
@@ -721,7 +721,7 @@ func (r *Runner) confirmDrift(p ocp.Paths, s *ocp.State, d *ocp.DriftError, comm
 	}
 	fmt.Fprintf(r.Out, "Generated files will be overwritten:\n  %s\nContinue? [y/N] ", strings.Join(d.Paths, "\n  "))
 	if r.confirm() {
-		res, e := r.install(p, s.Source, s.AutoCommit, false, true, false, s.Machine)
+		res, e := r.install(p, s.Source, s.AutoCommit, true, true, false, s.Machine)
 		if res != nil && e == nil {
 			fmt.Fprintf(r.Out, "Applied profile: %s\n", res.Active)
 			for _, w := range res.Warnings {
@@ -848,7 +848,7 @@ func (r *Runner) use(p ocp.Paths, args []string) error {
 		return e
 	}
 	if multiHarness(doc, options) {
-		return r.refreshHarnesses(p, s, doc, options, profile, false)
+		return r.refreshHarnesses(p, s, doc, options, profile, true)
 	}
 	if e := ocp.Activate(p, profile); e != nil {
 		return e
@@ -995,12 +995,16 @@ func (r *Runner) tokenSuffix(estimates map[string]ocp.ContextEstimate, name stri
 	return "  " + r.c.Style(color.ANSIDim, "~"+ocp.FormatTokens(est.Tokens)+" tokens")
 }
 func (r *Runner) status(p ocp.Paths, args []string) error {
-	if e := parse("status", args, func(*flag.FlagSet) {}); e != nil {
+	var asJSON bool
+	if e := parse("status", args, func(f *flag.FlagSet) { configureStatus(f, &asJSON) }); e != nil {
 		return e
 	}
 	s, e := sourceState(p)
 	if e != nil {
 		return e
+	}
+	if asJSON {
+		return r.statusJSON(p, s)
 	}
 	if doc, e := sourceDocument(s); e != nil {
 		return e

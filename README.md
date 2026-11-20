@@ -187,6 +187,17 @@ opencode
 
 `ocp sync` uses the current branch's configured upstream, safely merges non-conflicting divergence, pushes local canonical changes when automatic commits are enabled, resolves locked Git skills, renders profiles and preserves the active profile.
 
+## Let your agent manage OCP
+
+Agents edit configuration now more often than people do. OCP ships a skill that teaches Claude Code, Codex and OpenCode to make changes in the OCP source rather than in one harness's files. With it, "add the Playwright MCP, Mac only" lands in the right overlay and reaches every harness. Add it like any Git skill:
+
+```yaml
+skills:
+  - github:nandorocker/ocp//skills/ocp
+```
+
+The skill relies on `ocp status --json` to find the source and `ocp show --json` to read the effective configuration.
+
 ## Commands
 
 ### Multiple harnesses
@@ -224,7 +235,7 @@ ocp apply
 ocp use <profile>
 ocp run <profile> [args...]
 ocp list
-ocp status
+ocp status [--json]
 ocp show [profile] [--json] [--all]
 ocp version
 ocp import [path]
@@ -245,7 +256,7 @@ ocp reset
 
 `ocp --version` prints the version embedded at build time. Put `--no-color` before a command, or set `NO_COLOR`, to disable ANSI styling.
 
-Git-backed skills are locked to a commit in `ocp.lock` during setup or sync, so every machine renders the same files. `ocp upgrade` moves skills that follow a branch (no `@ref`, or a branch name) to the branch's latest commit, updates `ocp.lock` and re-renders. Skills pinned to a tag or a full commit ID never move; to move one, change its ref in the source and run `ocp sync`, which locks the new ref. `ocp upgrade skill <name>` upgrades one skill and `--preview` shows the changes without writing anything. If re-rendering fails, for example because of drift, `ocp.lock` is put back as it was. Run `ocp sync` afterwards to commit the new lock and share it.
+Git-backed skills are locked to a commit in `ocp.lock` the first time `ocp setup`, `ocp apply` or `ocp sync` sees them, so every machine renders the same files. `ocp upgrade` moves skills that follow a branch (no `@ref`, or a branch name) to the branch's latest commit, updates `ocp.lock` and re-renders. Skills pinned to a tag or a full commit ID never move; to move one, change its ref in the source and run `ocp apply`, which locks the new ref. `ocp upgrade skill <name>` upgrades one skill and `--preview` shows the changes without writing anything. If re-rendering fails, for example because of drift, `ocp.lock` is put back as it was. Run `ocp sync` afterwards to commit the new lock and share it.
 
 See [`docs/PRD.md`](docs/PRD.md) for the product requirements and configuration model.
 

@@ -201,7 +201,7 @@ func TestUpgradeRequiresLockEntry(t *testing.T) {
 	u.commit(map[string]string{"SKILL.md": "one"})
 	source, data := t.TempDir(), t.TempDir()
 	skill := config.Skill{Source: u.bare}
-	if _, err := planUpgrade(source, data, []config.Skill{skill}, "", allSources); err == nil || !strings.Contains(err.Error(), "ocp sync") {
+	if _, err := planUpgrade(source, data, []config.Skill{skill}, "", allSources); err == nil || !strings.Contains(err.Error(), "ocp apply") {
 		t.Fatalf("missing lock error = %v", err)
 	}
 	lockAll(t, source, data, []config.Skill{skill})
@@ -353,7 +353,7 @@ func TestPrepareRelocksChangedRefOnlyWithBootstrap(t *testing.T) {
 	v1 := config.Skill{Source: u.bare, Ref: "v1"}
 	lockAll(t, source, data, []config.Skill{v1})
 	v2 := config.Skill{Source: u.bare, Ref: "v2"}
-	if _, _, err := prepare(source, data, []config.Skill{v2}, false, allSources); err == nil || !strings.Contains(err.Error(), "run `ocp sync`") {
+	if _, _, err := prepare(source, data, []config.Skill{v2}, false, allSources); err == nil || !strings.Contains(err.Error(), "run `ocp apply`") {
 		t.Fatalf("ref change without bootstrap = %v", err)
 	}
 	if lockedCommit(t, source, v1) != first {

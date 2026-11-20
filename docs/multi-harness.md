@@ -157,7 +157,7 @@ ocp reset --harness claude --preview
 ocp reset --harness claude
 ```
 
-Preview performs no native configuration/state publication. Git-backed skills must already be locked and cached; run `ocp sync` first if needed.
+Preview performs no native configuration/state publication. Git-backed skills must already be locked and cached; run `ocp apply` first if needed.
 
 Native updates are individually atomic file replacements, not one transaction across applications. OCP preflights selected targets and journals each Claude/Codex update. On an interrupted update, resume explicitly:
 
