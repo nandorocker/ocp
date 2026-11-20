@@ -35,8 +35,12 @@ func (r *Runner) adopt(p ocp.Paths, args []string) error {
 		return err
 	}
 	source := ocp.AdoptSource{Skills: map[string]bool{}, MCP: map[string]bool{}, Instructions: map[string][]byte{}}
-	state, stateErr := sourceState(p)
-	if stateErr == nil {
+	state, err := ocp.LoadState(p)
+	if err != nil {
+		return err
+	}
+	haveSource := state != nil
+	if haveSource {
 		if err := loadAdoptSource(state, &source); err != nil {
 			return err
 		}
@@ -46,7 +50,7 @@ func (r *Runner) adopt(p ocp.Paths, args []string) error {
 		return err
 	}
 	if o.write != "" {
-		if stateErr == nil {
+		if haveSource {
 			return errors.New("OCP already has a source; add what you need to it instead (see `ocp adopt`), or run `ocp reset` first")
 		}
 		var harnesses []string
@@ -70,14 +74,26 @@ func (r *Runner) adopt(p ocp.Paths, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ocp.WriteAdoption(dir, inv, harnesses); err != nil {
+		warnings, err := ocp.WriteAdoption(dir, inv, harnesses)
+		if err != nil {
 			return err
 		}
 		r.c.Success("Created " + dir)
+		for _, w := range warnings {
+			r.c.Warning(w)
+		}
 		for _, s := range inv.Secrets {
 			r.c.Warning(fmt.Sprintf("set %s: %s now reads it from the environment", s.Env, s.Where))
 		}
-		fmt.Fprintf(r.Out, "Review it, then run: ocp setup --source %s\n", dir)
+		// Dry-run the install so conflicts with the hand-made originals show
+		// now, not as a failed setup.
+		for _, problem := range adoptionConflicts(p, dir, harnesses) {
+			r.c.Warning("before setup: " + problem)
+		}
+		if len(inv.Instructions) > 0 {
+			fmt.Fprintf(r.Out, "The instructions from %s are now the source's AGENTS.md; after setup, remove them from the original files so they do not load twice.\n", inv.Instructions[0].Path)
+		}
+		fmt.Fprintf(r.Out, "Review the copied files, then run: ocp setup --source %s\n", dir)
 		return nil
 	}
 	if o.json {
@@ -85,8 +101,35 @@ func (r *Runner) adopt(p ocp.Paths, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(inv)
 	}
-	r.reportAdoption(inv, p.Home, stateErr == nil)
+	r.reportAdoption(inv, p.Home, haveSource)
 	return nil
+}
+
+// adoptionConflicts plans, without writing, what setup would install into
+// Claude Code and Codex from the new source, and reports what would stop it.
+func adoptionConflicts(p ocp.Paths, dir string, harnesses []string) []string {
+	doc, err := config.Load(filepath.Join(dir, config.FileName))
+	if err != nil {
+		return []string{err.Error()}
+	}
+	profiles, err := doc.ResolveFromDir(dir)
+	if err != nil || len(profiles) == 0 {
+		return nil
+	}
+	var out []string
+	for _, h := range harnesses {
+		if h == "opencode" {
+			continue
+		}
+		rendered, err := ocp.PrepareNativeProfile(dir, profiles[0], h, "", nil)
+		if err == nil {
+			_, err = ocp.PlanNativeInstall(p, h, profiles[0].Name, rendered)
+		}
+		if err != nil {
+			out = append(out, h+": "+err.Error())
+		}
+	}
+	return out
 }
 
 // loadAdoptSource collects what the source declares, on every machine, so

@@ -1,6 +1,7 @@
 package ocp
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,7 @@ func TestWriteAdoptionCreatesALoadableSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(t.TempDir(), "source")
-	if err := WriteAdoption(dir, inv, []string{"opencode", "claude", "codex"}); err != nil {
+	if _, err := WriteAdoption(dir, inv, []string{"opencode", "claude", "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	doc, err := config.Load(filepath.Join(dir, config.FileName))
@@ -83,7 +84,89 @@ func TestWriteAdoptionCreatesALoadableSource(t *testing.T) {
 	if strings.Contains(string(b), "abcdefghijklmnopqrstuvwxyz") || !strings.Contains(string(b), "{env:FIGMA_AUTHORIZATION}") {
 		t.Fatalf("secret copied into the source:\n%s", b)
 	}
-	if err := WriteAdoption(dir, inv, nil); err == nil {
+	if _, err := WriteAdoption(dir, inv, nil); err == nil {
 		t.Fatal("wrote over a non-empty directory")
+	}
+}
+
+func TestRedactServerCatchesSecretsOutsideEnvAndHeaders(t *testing.T) {
+	cases := []struct {
+		in       map[string]any
+		field    string
+		leaked   string
+		contains string
+	}{
+		{map[string]any{"type": "remote", "url": "https://mcp.exa.ai/mcp?exaApiKey=abc123&mode=x"}, "url", "abc123", "exaApiKey={env:EXA_EXAAPIKEY}"},
+		{map[string]any{"type": "remote", "url": "https://user:hunter2@host.test/mcp"}, "url", "hunter2", "{env:EXA_URL_CREDENTIALS}@host.test"},
+		{map[string]any{"type": "local", "command": []any{"npx", "@smithery/cli", "run", "x", "--key", "abc123"}}, "command", "abc123", "{env:EXA_KEY}"},
+		{map[string]any{"type": "local", "command": []any{"srv", "--token=s3cr3t"}}, "command", "s3cr3t", "--token={env:EXA_TOKEN}"},
+		{map[string]any{"type": "local", "command": []any{"srv"}, "environment": map[string]any{"DB_PASS": "hunter2"}}, "environment", "hunter2", "{env:DB_PASS}"},
+	}
+	for _, tc := range cases {
+		out, secrets := redactServer("exa", tc.in)
+		text := describe(out)
+		if strings.Contains(text, tc.leaked) || !strings.Contains(text, tc.contains) || len(secrets) == 0 {
+			t.Errorf("%s: got %s, secrets %v", tc.field, text, secrets)
+		}
+	}
+	keep, secrets := redactServer("pw", map[string]any{"type": "local", "command": []any{"npx", "-y", "@playwright/mcp@latest"}, "environment": map[string]any{"ENABLE_MCP_APPS": "true"}})
+	if len(secrets) != 0 || !strings.Contains(describe(keep), "@playwright/mcp@latest") {
+		t.Errorf("redacted a harmless server: %s %v", describe(keep), secrets)
+	}
+}
+
+func describe(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func TestWriteAdoptionSkipsSecretFilesAndFollowsSymlinkedSkills(t *testing.T) {
+	p := nativeTestPaths(t)
+	p.OpenCode = filepath.Join(p.Home, ".config", "opencode")
+	real := filepath.Join(p.Home, ".agents", "skills", "linked")
+	nativeTestWrite(t, filepath.Join(real, "SKILL.md"), []byte("---\nname: linked\ndescription: d\n---\n"))
+	nativeTestWrite(t, filepath.Join(real, ".env"), []byte("KEY=secret"))
+	if err := os.MkdirAll(filepath.Join(p.Home, ".claude", "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(p.Home, ".claude", "skills", "linked")); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := Adopt(p, AdoptSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Skills) != 1 || len(inv.Skills[0].Found) != 2 || !inv.Skills[0].Same {
+		t.Fatalf("skills = %+v", inv.Skills)
+	}
+	dir := filepath.Join(t.TempDir(), "src")
+	warnings, err := WriteAdoption(dir, inv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "skills", "linked", ".env")); !os.IsNotExist(err) {
+		t.Fatal(".env was copied into the source")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], ".env") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+}
+
+func TestAdoptedFileUpdatedThenResetRestoresOriginal(t *testing.T) {
+	p := nativeTestPaths(t)
+	skill := nativeTestPath(t, p, "claude", "files/skills/hand/SKILL.md")
+	nativeTestWrite(t, skill, []byte("mine"))
+	if err := os.Chmod(skill, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	applyNative(t, p, "claude", NativeProfile{Files: map[string][]byte{"skills/hand/SKILL.md": []byte("mine")}})
+	applyNative(t, p, "claude", NativeProfile{Files: map[string][]byte{"skills/hand/SKILL.md": []byte("newer")}})
+	if got := string(nativeTestRead(t, skill)); got != "newer" {
+		t.Fatalf("update = %q", got)
+	}
+	nativeTestReset(t, p, "claude")
+	info, err := os.Stat(skill)
+	if err != nil || string(nativeTestRead(t, skill)) != "mine" || info.Mode().Perm() != 0o644 {
+		t.Fatalf("reset did not restore the user's file: %v %v", info, err)
 	}
 }

@@ -210,7 +210,12 @@ ocp adopt --json                  # the same, for an agent with the OCP skill
 ocp adopt --write ~/.config/ocp   # no source yet: create one from it
 ```
 
-`--write` copies skills, uses the first instruction file as `AGENTS.md`, and converts MCP servers to OpenCode's format. Values that look like secrets become `{env:NAME}` references, and the command lists each variable to set. When OCP later installs into a harness, a hand-copied skill file identical to the source's is adopted rather than refused, and left in place on reset.
+`--write` copies skills, uses the first instruction file as `AGENTS.md`, and converts MCP servers to OpenCode's format.
+
+- **Secrets:** values that look like secrets become `{env:NAME}` references, and the command lists each variable to set. This covers environment values, headers, URL credentials and query parameters, and command flags such as `--token`. Files such as `.env`, `*.pem` and `*.key` are left out of copied skills.
+- **Check before committing:** review the copied skills and `AGENTS.md`, which are copied as they are, before you commit the source.
+- **Conflicts:** `--write` dry-runs the install and lists hand-made entries that would conflict with `ocp setup`, such as an MCP server whose secret is now read from the environment. Remove those first.
+- **Hand-copied files:** when OCP installs into a harness, a hand-copied file identical to the source's is adopted rather than refused. If OCP later changes or drops it, the original file and its permissions are put back.
 
 ## Let your agent manage OCP
 

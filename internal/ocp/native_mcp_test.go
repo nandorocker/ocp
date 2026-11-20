@@ -2,6 +2,7 @@ package ocp
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -295,7 +296,7 @@ func TestNativeVersionOneStateStillResets(t *testing.T) {
 	applyNative(t, p, "codex", NativeProfile{Settings: map[string]any{"model": "managed"}})
 	statePath := nativeStatePath(p, "codex")
 	b := nativeTestRead(t, statePath)
-	nativeTestWrite(t, statePath, bytes.Replace(b, []byte(`"Version": 3`), []byte(`"Version": 1`), 1))
+	nativeTestWrite(t, statePath, bytes.Replace(b, []byte(fmt.Sprintf(`"Version": %d`, nativeStateVersion)), []byte(`"Version": 1`), 1))
 	if s, err := loadNativeState(p, "codex"); err != nil || s.Version != 1 {
 		t.Fatalf("v1 state = %v, %v", s.Version, err)
 	}
@@ -303,7 +304,7 @@ func TestNativeVersionOneStateStillResets(t *testing.T) {
 	if got := string(nativeTestRead(t, configPath)); got != "model = \"original\"\n" {
 		t.Fatalf("reset from v1 state = %q", got)
 	}
-	nativeTestWrite(t, statePath, []byte(`{"Version": 4}`))
+	nativeTestWrite(t, statePath, []byte(fmt.Sprintf(`{"Version": %d}`, nativeStateVersion+1)))
 	if _, err := loadNativeState(p, "codex"); err == nil || !strings.Contains(err.Error(), "upgrade ocp") {
 		t.Fatalf("future state = %v", err)
 	}

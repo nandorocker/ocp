@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -137,10 +140,22 @@ func Adopt(p Paths, source AdoptSource) (Adoption, error) {
 			return
 		}
 		for _, e := range entries {
-			if !e.IsDir() || skip[e.Name()] {
+			if skip[e.Name()] {
 				continue
 			}
 			dir := filepath.Join(root, e.Name())
+			if e.Type()&os.ModeSymlink != 0 {
+				// Installers often keep one copy and link it into each
+				// harness; adopt the folder the link points to.
+				resolved, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					continue
+				}
+				dir = resolved
+			}
+			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+				continue
+			}
 			if info, err := os.Lstat(filepath.Join(dir, "SKILL.md")); err != nil || !info.Mode().IsRegular() {
 				continue
 			}
@@ -211,7 +226,8 @@ func Adopt(p Paths, source AdoptSource) (Adoption, error) {
 		var first any
 		for _, h := range sortedKeys(servers[name]) {
 			v := servers[name][h]
-			item.Found[h] = describeServer(v)
+			redacted, _ := redactServer(name, v)
+			item.Found[h] = describeServer(redacted)
 			if first == nil {
 				first = v
 			} else if !nativeEqual(first, v) {
@@ -272,7 +288,13 @@ func similar(a, b []byte) bool {
 func treeHash(dir string) string {
 	h := sha256.New()
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !d.Type().IsRegular() || d.Name() == ".DS_Store" {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !d.Type().IsRegular() || d.Name() == ".DS_Store" {
 			return nil
 		}
 		rel, _ := filepath.Rel(dir, path)
@@ -438,11 +460,21 @@ func describeServer(v any) string {
 	return ""
 }
 
-var secretName = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|auth|bearer|credential|private)`)
+var secretName = regexp.MustCompile(`(?i)(token|secret|pass|pwd|pat\b|api[_-]?key|apikey|\bkey\b|_key|key_|auth|bearer|credential|private|dsn|cookie|session|signature|sig\b)`)
 var secretValue = regexp.MustCompile(`[A-Za-z0-9_\-./+=]{24,}`)
+var nonEnvChars = regexp.MustCompile(`[^A-Z0-9_]+`)
+
+func envName(parts ...string) string {
+	return strings.Trim(nonEnvChars.ReplaceAllString(strings.ToUpper(strings.Join(parts, "_")), "_"), "_")
+}
+
+func looksSecret(name, value string) bool {
+	return value != "" && !hasSubstitution(value) && (secretName.MatchString(name) || secretValue.MatchString(value))
+}
 
 // redactServer replaces values that look secret with {env:NAME} references
-// and reports each one, so no secret is copied into the source.
+// and reports each one, so no secret is copied into the source: environment
+// values, headers, URL credentials and query values, and command flags.
 func redactServer(name string, v any) (any, []AdoptSecret) {
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -450,18 +482,14 @@ func redactServer(name string, v any) (any, []AdoptSecret) {
 	}
 	out := cloneMap(m)
 	var secrets []AdoptSecret
-	envName := func(parts ...string) string {
-		s := strings.ToUpper(strings.Join(parts, "_"))
-		return regexp.MustCompile(`[^A-Z0-9_]+`).ReplaceAllString(s, "_")
+	note := func(where, env string) {
+		secrets = append(secrets, AdoptSecret{Where: "mcp " + name + " " + where, Env: env})
 	}
 	for _, field := range []string{"environment", "headers"} {
 		values, _ := out[field].(map[string]any)
 		for _, k := range sortedKeys(values) {
 			text, _ := values[k].(string)
-			if text == "" || hasSubstitution(text) {
-				continue
-			}
-			if !secretName.MatchString(k) && !secretValue.MatchString(text) {
+			if !looksSecret(k, text) {
 				continue
 			}
 			env := envName(name, k)
@@ -473,8 +501,65 @@ func redactServer(name string, v any) (any, []AdoptSecret) {
 				replacement = "Bearer " + replacement
 			}
 			values[k] = replacement
-			secrets = append(secrets, AdoptSecret{Where: "mcp " + name + " " + strings.TrimSuffix(field, "s") + " " + k, Env: env})
+			note(strings.TrimSuffix(field, "s")+" "+k, env)
 		}
+	}
+	if raw, ok := out["url"].(string); ok && !hasSubstitution(raw) {
+		if u, err := url.Parse(raw); err == nil {
+			changed := false
+			if u.User != nil {
+				env := envName(name, "URL_CREDENTIALS")
+				u.User = url.User("{env:" + env + "}")
+				note("url credentials", env)
+				changed = true
+			}
+			q := u.Query()
+			for _, k := range sortedKeys(q) {
+				if looksSecret(k, q.Get(k)) {
+					env := envName(name, k)
+					q.Set(k, "{env:"+env+"}")
+					note("url parameter "+k, env)
+					changed = true
+				}
+			}
+			if changed {
+				u.RawQuery = q.Encode()
+				text := u.String()
+				// url.String escapes the braces of the placeholders.
+				text = strings.NewReplacer("%7B", "{", "%7D", "}", "%3A", ":").Replace(text)
+				out["url"] = text
+			}
+		}
+	}
+	if cmd, ok := out["command"].([]any); ok {
+		words := make([]any, len(cmd))
+		copy(words, cmd)
+		for i := 1; i < len(words); i++ {
+			word, _ := words[i].(string)
+			if flag, value, ok := strings.Cut(word, "="); ok && strings.HasPrefix(flag, "-") {
+				if looksSecret(flag, value) {
+					env := envName(name, strings.TrimLeft(flag, "-"))
+					words[i] = flag + "={env:" + env + "}"
+					note("argument "+flag, env)
+				}
+				continue
+			}
+			if strings.HasPrefix(word, "-") && secretName.MatchString(word) && i+1 < len(words) {
+				if next, _ := words[i+1].(string); next != "" && !strings.HasPrefix(next, "-") && !hasSubstitution(next) {
+					env := envName(name, strings.TrimLeft(word, "-"))
+					words[i+1] = "{env:" + env + "}"
+					note("argument "+word, env)
+					i++
+				}
+				continue
+			}
+			if looksSecret("", word) && !strings.ContainsAny(word, "/@") {
+				env := envName(name, "ARG", strconv.Itoa(i))
+				words[i] = "{env:" + env + "}"
+				note("argument "+strconv.Itoa(i), env)
+			}
+		}
+		out["command"] = words
 	}
 	return out, secrets
 }
@@ -482,15 +567,15 @@ func redactServer(name string, v any) (any, []AdoptSecret) {
 // WriteAdoption creates a new OCP source at dir from an inventory: one
 // ocp.yaml, the skills it found, and the first instruction text. dir must
 // not exist or be empty.
-func WriteAdoption(dir string, a Adoption, harnesses []string) error {
+func WriteAdoption(dir string, a Adoption, harnesses []string) ([]string, error) {
 	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
-		return errors.New("target directory is not empty")
+		return nil, errors.New("target directory is not empty")
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	tmp, err := os.MkdirTemp(filepath.Dir(filepath.Clean(dir)), ".ocp-adopt-")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(tmp)
 	doc := map[string]any{"version": 1}
@@ -499,17 +584,23 @@ func WriteAdoption(dir string, a Adoption, harnesses []string) error {
 	}
 	if len(a.Instructions) > 0 {
 		if err := atomicFile(filepath.Join(tmp, "AGENTS.md"), append(a.Instructions[0].text, '\n'), 0o600); err != nil {
-			return err
+			return nil, err
 		}
 		doc["instructions"] = []string{"AGENTS.md"}
 	}
-	var skills []string
+	var skills, warnings []string
 	for _, s := range a.Skills {
 		if s.dir == "" {
 			continue
 		}
-		if err := copyTree(filepath.Join(tmp, "skills", s.Name), s.dir); err != nil {
-			return err
+		skipped, err := copySkill(filepath.Join(tmp, "skills", s.Name), s.dir)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("skill %s not copied: %v", s.Name, err))
+			_ = os.RemoveAll(filepath.Join(tmp, "skills", s.Name))
+			continue
+		}
+		for _, f := range skipped {
+			warnings = append(warnings, fmt.Sprintf("skill %s: left out %s, which may hold a secret", s.Name, f))
 		}
 		skills = append(skills, s.Name)
 	}
@@ -526,15 +617,60 @@ func WriteAdoption(dir string, a Adoption, harnesses []string) error {
 	}
 	b, err := marshalYAML(doc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := atomicFile(filepath.Join(tmp, "ocp.yaml"), b, 0o600); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
-	return os.Rename(tmp, dir)
+	return warnings, os.Rename(tmp, dir)
+}
+
+var secretFile = regexp.MustCompile(`(?i)^(\.env.*|.*\.pem|.*\.key|.*credential.*|.*secret.*|id_rsa.*|id_ed25519.*)$`)
+
+// copySkill copies a skill folder with private permissions, leaving out
+// files that commonly hold secrets and dependency folders. Symlinks are
+// refused, as the renderer would.
+func copySkill(dest, src string) ([]string, error) {
+	var skipped []string
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("contains a symlink: %s", rel)
+		}
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(dest, rel), 0o700)
+		}
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("contains a special file: %s", rel)
+		}
+		if secretFile.MatchString(d.Name()) {
+			skipped = append(skipped, rel)
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o600)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode = 0o700
+		}
+		return os.WriteFile(filepath.Join(dest, rel), b, mode)
+	})
+	return skipped, err
 }
 
 // marshalYAML writes the document's keys in a readable order.
