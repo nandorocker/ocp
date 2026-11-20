@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 //
 //	ocp secret print '<template>'
 //	ocp secret exec NAME=<template>... -- <command> [args...]
+//	ocp secret headers NAME=<template>...   (prints a JSON object)
 func (r *Runner) secret(args []string) error {
 	if len(args) == 0 {
 		return usageError(errors.New("secret requires print or exec"))
@@ -32,6 +34,23 @@ func (r *Runner) secret(args []string) error {
 		}
 		fmt.Fprint(r.Out, value)
 		return nil
+	case "headers":
+		if len(args) < 2 {
+			return usageError(errors.New("secret headers requires NAME=template..."))
+		}
+		headers := map[string]string{}
+		for _, pair := range args[1:] {
+			name, template, ok := strings.Cut(pair, "=")
+			if !ok || name == "" {
+				return usageError(fmt.Errorf("secret headers: %q is not NAME=template", pair))
+			}
+			value, err := ocp.ExpandSubstitutions(template)
+			if err != nil {
+				return fmt.Errorf("secret headers %s: %w", name, err)
+			}
+			headers[name] = value
+		}
+		return json.NewEncoder(r.Out).Encode(headers)
 	case "exec":
 		sep := -1
 		for i, a := range args {

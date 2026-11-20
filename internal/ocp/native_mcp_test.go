@@ -98,6 +98,7 @@ func TestCodexMCPServerTranslation(t *testing.T) {
 
 func TestPrepareNativeProfileMCPAndHarnessBlocks(t *testing.T) {
 	withHelper(t, "/opt/ocp", nil)
+	withFakeClaude(t)
 	p := config.Profile{
 		Config: map[string]any{"model": map[string]any{"opencode": "zai/glm", "claude": "glm-5", "codex": "glm-5"}, "providers": map[string]any{"zai": map[string]any{}},
 			"mcp": map[string]any{"servers": map[string]any{"pw": map[string]any{"type": "local", "command": []any{"npx", "pw"}}}}},
@@ -111,8 +112,8 @@ func TestPrepareNativeProfileMCPAndHarnessBlocks(t *testing.T) {
 	if claude.Settings["apiKeyHelper"] != "'/opt/ocp' secret print '{file:~/.zai}'" || claude.Settings["model"] != "glm-5" {
 		t.Fatalf("claude settings = %v", claude.Settings)
 	}
-	if _, has := claude.Settings["mcp_servers"]; has || !strings.Contains(strings.Join(claude.Warnings, "\n"), `MCP server "pw" not installed`) {
-		t.Fatalf("claude MCP handling = %v / %v", claude.Settings, claude.Warnings)
+	if _, has := claude.Settings["mcp_servers"]; has || !nativeEqual(claude.MCP, map[string]any{"pw": map[string]any{"type": "stdio", "command": "npx", "args": []any{"pw"}}}) {
+		t.Fatalf("claude MCP handling = %v / %v", claude.Settings, claude.MCP)
 	}
 	codex, err := PrepareNativeProfile(t.TempDir(), p, "codex", "", nil)
 	if err != nil {
@@ -294,7 +295,7 @@ func TestNativeVersionOneStateStillResets(t *testing.T) {
 	applyNative(t, p, "codex", NativeProfile{Settings: map[string]any{"model": "managed"}})
 	statePath := nativeStatePath(p, "codex")
 	b := nativeTestRead(t, statePath)
-	nativeTestWrite(t, statePath, bytes.Replace(b, []byte(`"Version": 2`), []byte(`"Version": 1`), 1))
+	nativeTestWrite(t, statePath, bytes.Replace(b, []byte(`"Version": 3`), []byte(`"Version": 1`), 1))
 	if s, err := loadNativeState(p, "codex"); err != nil || s.Version != 1 {
 		t.Fatalf("v1 state = %v, %v", s.Version, err)
 	}
@@ -302,7 +303,7 @@ func TestNativeVersionOneStateStillResets(t *testing.T) {
 	if got := string(nativeTestRead(t, configPath)); got != "model = \"original\"\n" {
 		t.Fatalf("reset from v1 state = %q", got)
 	}
-	nativeTestWrite(t, statePath, []byte(`{"Version": 3}`))
+	nativeTestWrite(t, statePath, []byte(`{"Version": 4}`))
 	if _, err := loadNativeState(p, "codex"); err == nil || !strings.Contains(err.Error(), "upgrade ocp") {
 		t.Fatalf("future state = %v", err)
 	}

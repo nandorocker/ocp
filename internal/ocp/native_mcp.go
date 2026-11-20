@@ -344,3 +344,108 @@ func mergeHarnessBlock(settings map[string]any, harness string, p config.Profile
 	}
 	return nil
 }
+
+// claudeTemplate turns OpenCode {env:NAME} placeholders into the ${NAME}
+// expansion Claude Code performs for MCP servers. It reports whether the
+// value also reads a file, which Claude cannot do itself.
+func claudeTemplate(v string) (string, bool) {
+	readsFile := false
+	out := substitution.ReplaceAllStringFunc(v, func(m string) string {
+		if name, ok := exactEnv(m); ok {
+			return "${" + name + "}"
+		}
+		readsFile = true
+		return m
+	})
+	return out, readsFile
+}
+
+// claudeMCPServer renders one server in the form Claude Code stores. Values
+// read from environment variables use Claude's ${NAME} expansion; values
+// read from files go through `ocp secret exec` (environment) or a
+// headersHelper running `ocp secret headers` (headers). No secret is written.
+func claudeMCPServer(s mcpServer, source string) (map[string]any, string, error) {
+	if !claudeServerName.MatchString(s.Name) {
+		return nil, fmt.Sprintf("MCP server %q skipped: Claude Code server names use letters, digits, - and _ and must not start with -", s.Name), nil
+	}
+	if s.Local {
+		command := make([]any, 0, len(s.Command))
+		for _, word := range s.Command {
+			text, readsFile := claudeTemplate(word)
+			if readsFile {
+				return nil, fmt.Sprintf("MCP server %q skipped: {file:} in its command is not supported", s.Name), nil
+			}
+			command = append(command, text)
+		}
+		env := map[string]any{}
+		secret := map[string]string{}
+		for _, k := range sortedKeys(s.Env) {
+			v := s.Env[k]
+			text, readsFile := claudeTemplate(v)
+			if !readsFile {
+				env[k] = text
+				continue
+			}
+			if strings.ContainsAny(v, "\n\x00") {
+				return nil, "", fmt.Errorf("mcp server %q environment %s: a template read at run time must not contain newlines", s.Name, k)
+			}
+			secret[k] = absoluteFiles(v, source)
+		}
+		if len(secret) > 0 {
+			helper, err := ocpExecutable()
+			if err != nil {
+				return nil, fmt.Sprintf("MCP server %q skipped: %v", s.Name, err), nil
+			}
+			wrapped := []any{helper, "secret", "exec"}
+			for _, pair := range secretArgs(secret) {
+				wrapped = append(wrapped, pair)
+			}
+			// Claude expands ${NAME} in these words before the helper runs.
+			command = append(append(wrapped, "--"), command...)
+		}
+		out := map[string]any{"type": "stdio", "command": command[0], "args": command[1:]}
+		if len(env) > 0 {
+			out["env"] = env
+		}
+		return out, "", nil
+	}
+	url, readsFile := claudeTemplate(s.URL)
+	if readsFile {
+		return nil, fmt.Sprintf("MCP server %q skipped: {file:} in its url is not supported", s.Name), nil
+	}
+	out := map[string]any{"type": "http", "url": url}
+	headers := map[string]any{}
+	secret := map[string]string{}
+	for _, h := range sortedKeys(s.Headers) {
+		text, readsFile := claudeTemplate(s.Headers[h])
+		if !readsFile {
+			headers[h] = text
+			continue
+		}
+		if strings.ContainsAny(s.Headers[h], "\n\x00") {
+			return nil, "", fmt.Errorf("mcp server %q header %s: a template read at run time must not contain newlines", s.Name, h)
+		}
+		secret[h] = absoluteFiles(s.Headers[h], source)
+	}
+	if len(headers) > 0 {
+		out["headers"] = headers
+	}
+	if len(secret) > 0 {
+		helper, err := ocpExecutable()
+		if err != nil {
+			return nil, fmt.Sprintf("MCP server %q skipped: %v", s.Name, err), nil
+		}
+		words := []string{shellQuote(helper), "secret", "headers"}
+		for _, pair := range secretArgs(secret) {
+			words = append(words, shellQuote(pair))
+		}
+		out["headersHelper"] = strings.Join(words, " ")
+	}
+	return out, "", nil
+}
+
+var claudeServerName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]*$`)
+
+// claudeCommand finds the claude CLI, which OCP uses to add and remove MCP
+// servers instead of writing ~/.claude.json while Claude may be using it.
+var claudeCommand = func() (string, error) { return exec.LookPath("claude") }
